@@ -1,0 +1,16 @@
+# Genesis Blackbox Protocol for Claude
+
+When diagnosing runtime errors or investigating regressions in this project, use the native Genesis Blackbox MCP tools:
+
+## Available MCP Tools:
+- `get_crash_autopsy`: Compiles `.blackbox.md` deterministic autopsy from the circular SQLite WAL log.
+- `generate_reproduction_test`: Generates a standalone Python reproduction test (`test_blackbox_reproduce.py`) with reconstructed frame variables and mock patches.
+- `get_blast_radius`: Analyzes upstream and downstream dependencies for modified symbols.
+- `query_execution_timeline`: Inspects the sequence of HTTP requests, SQL queries, and subprocess invocations leading to the crash.
+
+## Mandatory Execution Protocol:
+1. Call `get_crash_autopsy` to examine root-cause variables and preceding execution timeline.
+2. Call `generate_reproduction_test` to generate and run the reproduction test.
+3. Validate that the reproduction script fails with the recorded crash before writing code diffs.
+4. Apply the targeted fix within the function's blast radius.
+5. Confirm the reproduction test passes cleanly before reporting completion.

@@ -1,0 +1,3 @@
+recursive-include blackbox/templates *
+include LICENSE
+include README.md

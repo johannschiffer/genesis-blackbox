@@ -16,6 +16,8 @@ from .recorder.wal_ring import WalRingBuffer
 from .recorder.runner import run_target
 from .ast_engine.graph import CodebaseGraph
 from .compiler.autopsy import CausalCrashCompiler
+from .compiler.reproducer import CrashReproducer
+
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -59,6 +61,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     ui_parser.add_argument("--port", type=int, default=8765, help="Port to listen on (default: 8765)")
     ui_parser.add_argument("--db", default=".blackbox/wal.sqlite", help="Path to WAL database (default: .blackbox/wal.sqlite)")
     ui_parser.add_argument("--no-browser", action="store_true", help="Do not automatically open browser")
+
+    # Subcommand: reproduce
+    rep_parser = subparsers.add_parser("reproduce", help="Synthesize standalone crash reproduction test script")
+    rep_parser.add_argument("--db", default=".blackbox/wal.sqlite", help="Path to WAL database")
+    rep_parser.add_argument("--output", default="test_reproduce.py", help="Output test file path (default: test_reproduce.py)")
+
+    # Subcommand: init-rules
+    rules_parser = subparsers.add_parser("init-rules", help="Initialize agent instructions template (Cursor, Claude, Windsurf)")
+    rules_parser.add_argument("--type", choices=["cursor", "claude", "windsurf"], default="cursor", help="Target agent rule type")
+    rules_parser.add_argument("--output", help="Custom destination path")
 
     args = parser.parse_args(argv)
 
@@ -148,7 +160,49 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         return 0
 
+    elif args.command == "reproduce":
+        ring = WalRingBuffer(db_path=args.db)
+        reproducer = CrashReproducer(wal_ring=ring)
+        code = reproducer.generate()
+
+        if args.output and args.output != "-":
+            out_path = os.path.abspath(args.output)
+            os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write(code)
+            print(f"[Genesis-Blackbox] Reproduction test written to {args.output}")
+        else:
+            print(code)
+        return 0
+
+    elif args.command == "init-rules":
+        template_dir = os.path.join(os.path.dirname(__file__), "templates", "rules")
+        target_map = {
+            "cursor": ("cursorrules.template", ".cursorrules"),
+            "claude": ("claude_md.template", "CLAUDE.md"),
+            "windsurf": ("windsurf.template", ".windsurfrules"),
+        }
+        template_name, default_dest = target_map.get(args.type, ("cursorrules.template", ".cursorrules"))
+        src_path = os.path.join(template_dir, template_name)
+        dest_path = args.output or default_dest
+
+        if not os.path.isfile(src_path):
+            print(f"[Genesis-Blackbox] Error: Template not found at {src_path}", file=sys.stderr)
+            return 1
+
+        with open(src_path, "r", encoding="utf-8") as f_in:
+            content = f_in.read()
+
+        out_path = os.path.abspath(dest_path)
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f_out:
+            f_out.write(content)
+
+        print(f"[Genesis-Blackbox] Agent rules ({args.type}) initialized at {dest_path}")
+        return 0
+
     return 0
+
 
 
 if __name__ == "__main__":

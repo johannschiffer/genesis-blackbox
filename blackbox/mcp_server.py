@@ -11,6 +11,8 @@ from typing import Dict, Any, List, Optional
 from .recorder.wal_ring import WalRingBuffer
 from .ast_engine.graph import CodebaseGraph
 from .compiler.autopsy import CausalCrashCompiler
+from .compiler.reproducer import CrashReproducer
+
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger("BlackboxMCPServer")
@@ -23,7 +25,7 @@ class BlackboxMCPServer:
         self.ast_graph = CodebaseGraph()
         self.compiler = CausalCrashCompiler(self.wal_ring, self.ast_graph)
         self.name = "genesis-blackbox"
-        self.version = "0.2.0"
+        self.version = "0.1.1"
         self._init_tools()
 
     def _init_tools(self):
@@ -93,6 +95,23 @@ class BlackboxMCPServer:
                     payload=args["payload"],
                     source=args.get("source", "agent")
                 )
+            },
+            "generate_reproduction_test": {
+                "name": "generate_reproduction_test",
+                "description": "Synthesizes a standalone, executable Python reproduction test (pytest) from the latest recorded crash in WAL.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "db_path": {
+                            "type": "string",
+                            "description": "Path to WAL SQLite database (default: .blackbox/wal.sqlite)",
+                            "default": ".blackbox/wal.sqlite"
+                        }
+                    }
+                },
+                "handler": lambda args: self.generate_reproduction_test(
+                    db_path=args.get("db_path", self.default_db_path)
+                )
             }
         }
         # Register aliases for backwards compatibility
@@ -100,6 +119,13 @@ class BlackboxMCPServer:
         self.tools["blackbox_blast_radius"] = self.tools["get_blast_radius"]
         self.tools["blackbox_query_timeline"] = self.tools["query_execution_timeline"]
         self.tools["blackbox_record_event"] = self.tools["record_event"]
+        self.tools["blackbox_generate_reproduction_test"] = self.tools["generate_reproduction_test"]
+
+    def generate_reproduction_test(self, db_path: str = ".blackbox/wal.sqlite") -> str:
+        """Synthesizes and returns standalone Python reproduction test script from WAL database."""
+        ring = self.wal_ring if db_path == self.default_db_path else WalRingBuffer(db_path=db_path)
+        reproducer = CrashReproducer(wal_ring=ring)
+        return reproducer.generate()
 
     def get_crash_autopsy(self, db_path: str = ".blackbox/wal.sqlite") -> str:
         """Compiles and returns .blackbox.md autopsy markdown from WAL database."""
@@ -163,7 +189,13 @@ class BlackboxMCPServer:
             }
         elif method == "tools/list":
             # List distinct primary tools
-            distinct = ["get_crash_autopsy", "get_blast_radius", "query_execution_timeline", "record_event"]
+            distinct = [
+                "get_crash_autopsy",
+                "generate_reproduction_test",
+                "get_blast_radius",
+                "query_execution_timeline",
+                "record_event"
+            ]
             tool_list = [
                 {
                     "name": self.tools[k]["name"],

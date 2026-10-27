@@ -1,0 +1,25 @@
+# Genesis Blackbox Integration Directives for Cursor Agent
+
+You are working in a repository equipped with Genesis Blackbox runtime flight recording.
+Follow this mandatory debug protocol whenever resolving any runtime exception, test failure, or bug:
+
+## 1. Zero Guessing & Hallucination Gate
+- Never invent hypothetical root causes when a crash occurs.
+- Immediately consult `.blackbox.md` (or run `blackbox autopsy`) to inspect:
+  1. The deterministic root-cause stack frame.
+  2. Local variable bindings captured at crash time.
+  3. Preceding HTTP, SQL, and subprocess execution timelines.
+  4. AST blast radius indicating upstream callers and downstream callees.
+
+## 2. Deterministic Reproduction Before Code Edits
+- Run `blackbox reproduce --output test_blackbox_reproduce.py` to generate the standalone reproduction test.
+- Execute `pytest test_blackbox_reproduce.py` to confirm the reproduction test reproduces the exact recorded failure.
+- Do NOT touch application source code until the reproduction test fails with the expected exception.
+
+## 3. Scoped Blast-Radius Implementation
+- Confine all code changes strictly within the impacted function and its AST blast radius.
+- Do not introduce unrelated refactorings or suppress exceptions with blanket try/except blocks.
+
+## 4. Verification Gate
+- Re-run `pytest test_blackbox_reproduce.py`.
+- The task is complete ONLY when the reproduction test passes 100% and existing project test suites remain green.

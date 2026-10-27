@@ -1,0 +1,9 @@
+# Genesis Blackbox Integration Directives for Windsurf / Cascade
+
+When resolving runtime exceptions, follow the Genesis Blackbox workflow:
+
+1. Consult `.blackbox.md` or execute `blackbox autopsy` to inspect deterministic frame states and execution timelines.
+2. Run `blackbox reproduce` to synthesize the reproduction script `test_blackbox_reproduce.py`.
+3. Confirm reproduction with `pytest test_blackbox_reproduce.py`.
+4. Perform the fix strictly inside the AST blast radius.
+5. Verify fix by ensuring `pytest test_blackbox_reproduce.py` exits 0.

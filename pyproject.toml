@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "genesis-blackbox"
-version = "1.0.0"
+version = "0.1.1"
 description = "Deterministic Runtime Flight Recorder & AST Blast-Radius Causal Crash Compiler for AI-Assisted Software Engineering"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -37,3 +37,7 @@ blackbox-mcp = "blackbox.mcp_server:main"
 Homepage = "https://github.com/johannschiffer/genesis-blackbox"
 Repository = "https://github.com/johannschiffer/genesis-blackbox"
 "Support / Donate" = "https://ko-fi.com/johannschiffer"
+
+[tool.setuptools.package-data]
+blackbox = ["templates/rules/*"]
+
