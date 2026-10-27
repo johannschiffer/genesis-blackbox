@@ -17,6 +17,8 @@ from .recorder.runner import run_target
 from .ast_engine.graph import CodebaseGraph
 from .compiler.autopsy import CausalCrashCompiler
 from .compiler.reproducer import CrashReproducer
+from .compiler.verifier import CausalVerifier
+
 
 
 
@@ -71,6 +73,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     rules_parser = subparsers.add_parser("init-rules", help="Initialize agent instructions template (Cursor, Claude, Windsurf)")
     rules_parser.add_argument("--type", choices=["cursor", "claude", "windsurf"], default="cursor", help="Target agent rule type")
     rules_parser.add_argument("--output", help="Custom destination path")
+
+    # Subcommand: verify
+    ver_parser = subparsers.add_parser("verify", help="Execute reproduction test and generate resolution verification receipt")
+    ver_parser.add_argument("--test", default="test_blackbox_reproduce.py", help="Path to reproduction test file (default: test_blackbox_reproduce.py)")
+    ver_parser.add_argument("--receipt", default=".blackbox-resolved.md", help="Path to resolution receipt markdown file (default: .blackbox-resolved.md)")
+    ver_parser.add_argument("--db", default=".blackbox/wal.sqlite", help="Path to WAL database")
 
     args = parser.parse_args(argv)
 
@@ -201,7 +209,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"[Genesis-Blackbox] Agent rules ({args.type}) initialized at {dest_path}")
         return 0
 
+    elif args.command == "verify":
+        ring = WalRingBuffer(db_path=args.db)
+        verifier = CausalVerifier(wal_ring=ring, db_path=args.db, receipt_path=args.receipt)
+        result = verifier.verify(test_path=args.test)
+
+        if result.get("resolved"):
+            dur = result.get("duration_ms", 0)
+            print(f"[Genesis-Blackbox] Verification PASSED ({dur:.2f}ms).")
+            print(f"[Genesis-Blackbox] Resolution receipt written to {result.get('receipt_path')}")
+            return 0
+        else:
+            print(f"[Genesis-Blackbox] Verification FAILED (exit code {result.get('exit_code')}).", file=sys.stderr)
+            if result.get("output"):
+                print(result.get("output"), file=sys.stderr)
+            return 1
+
     return 0
+
 
 
 

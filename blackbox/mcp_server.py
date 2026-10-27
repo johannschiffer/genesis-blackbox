@@ -12,6 +12,8 @@ from .recorder.wal_ring import WalRingBuffer
 from .ast_engine.graph import CodebaseGraph
 from .compiler.autopsy import CausalCrashCompiler
 from .compiler.reproducer import CrashReproducer
+from .compiler.verifier import CausalVerifier
+
 
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
@@ -25,7 +27,7 @@ class BlackboxMCPServer:
         self.ast_graph = CodebaseGraph()
         self.compiler = CausalCrashCompiler(self.wal_ring, self.ast_graph)
         self.name = "genesis-blackbox"
-        self.version = "0.1.1"
+        self.version = "0.1.2"
         self._init_tools()
 
     def _init_tools(self):
@@ -112,6 +114,35 @@ class BlackboxMCPServer:
                 "handler": lambda args: self.generate_reproduction_test(
                     db_path=args.get("db_path", self.default_db_path)
                 )
+            },
+            "verify_crash_resolution": {
+                "name": "verify_crash_resolution",
+                "description": "Executes the synthesized reproduction test to verify if the code fix resolves the crash without regression, emitting a resolution receipt upon success.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "test_path": {
+                            "type": "string",
+                            "description": "Path to reproduction test file (default: test_blackbox_reproduce.py)",
+                            "default": "test_blackbox_reproduce.py"
+                        },
+                        "db_path": {
+                            "type": "string",
+                            "description": "Path to WAL SQLite database (default: .blackbox/wal.sqlite)",
+                            "default": ".blackbox/wal.sqlite"
+                        },
+                        "receipt_path": {
+                            "type": "string",
+                            "description": "Path to output resolution receipt markdown (default: .blackbox-resolved.md)",
+                            "default": ".blackbox-resolved.md"
+                        }
+                    }
+                },
+                "handler": lambda args: self.verify_crash_resolution(
+                    test_path=args.get("test_path", "test_blackbox_reproduce.py"),
+                    db_path=args.get("db_path", self.default_db_path),
+                    receipt_path=args.get("receipt_path", ".blackbox-resolved.md")
+                )
             }
         }
         # Register aliases for backwards compatibility
@@ -120,12 +151,25 @@ class BlackboxMCPServer:
         self.tools["blackbox_query_timeline"] = self.tools["query_execution_timeline"]
         self.tools["blackbox_record_event"] = self.tools["record_event"]
         self.tools["blackbox_generate_reproduction_test"] = self.tools["generate_reproduction_test"]
+        self.tools["blackbox_verify_crash_resolution"] = self.tools["verify_crash_resolution"]
 
     def generate_reproduction_test(self, db_path: str = ".blackbox/wal.sqlite") -> str:
         """Synthesizes and returns standalone Python reproduction test script from WAL database."""
         ring = self.wal_ring if db_path == self.default_db_path else WalRingBuffer(db_path=db_path)
         reproducer = CrashReproducer(wal_ring=ring)
         return reproducer.generate()
+
+    def verify_crash_resolution(
+        self,
+        test_path: str = "test_blackbox_reproduce.py",
+        db_path: str = ".blackbox/wal.sqlite",
+        receipt_path: str = ".blackbox-resolved.md"
+    ) -> Dict[str, Any]:
+        """Runs the reproduction test and issues a resolution receipt if the crash is fixed."""
+        ring = self.wal_ring if db_path == self.default_db_path else WalRingBuffer(db_path=db_path)
+        verifier = CausalVerifier(wal_ring=ring, db_path=db_path, receipt_path=receipt_path)
+        return verifier.verify(test_path=test_path)
+
 
     def get_crash_autopsy(self, db_path: str = ".blackbox/wal.sqlite") -> str:
         """Compiles and returns .blackbox.md autopsy markdown from WAL database."""
@@ -192,6 +236,7 @@ class BlackboxMCPServer:
             distinct = [
                 "get_crash_autopsy",
                 "generate_reproduction_test",
+                "verify_crash_resolution",
                 "get_blast_radius",
                 "query_execution_timeline",
                 "record_event"
