@@ -3,7 +3,9 @@ Genesis Blackbox: AST Dependency & Blast-Radius Engine
 Parses Python source files to extract call graphs and determine upstream/downstream blast radius.
 """
 
+import os
 import ast
+import subprocess
 from typing import Dict, Any, List, Set, Optional
 
 
@@ -64,8 +66,41 @@ class CodebaseGraph:
         except Exception:
             pass
 
-    def get_blast_radius(self, target_function: str, depth: int = 2) -> Dict[str, Any]:
+    def parse_file(self, file_path: str) -> bool:
+        """Parses a single Python file from disk."""
+        if not os.path.isfile(file_path):
+            return False
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+            self.parse_source(content, filename=file_path)
+            return True
+        except Exception:
+            return False
+
+    def parse_directory(self, dir_path: str, max_files: int = 50) -> int:
+        """Parses all Python files within a directory up to max_files."""
+        count = 0
+        for root, _, files in os.walk(dir_path):
+            for file in files:
+                if file.endswith(".py"):
+                    full_path = os.path.join(root, file)
+                    if self.parse_file(full_path):
+                        count += 1
+                        if count >= max_files:
+                            return count
+        return count
+
+    def get_blast_radius(
+        self,
+        target_function: str,
+        depth: int = 2,
+        file_path: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Calculates upstream callers and downstream dependencies."""
+        if file_path and target_function not in self.nodes:
+            self.parse_file(file_path)
+
         upstream = set()
         downstream = set()
 
@@ -96,3 +131,25 @@ class CodebaseGraph:
             "downstream_callees": sorted(list(downstream)),
             "total_blast_radius": len(upstream) + len(downstream)
         }
+
+    @staticmethod
+    def get_git_diff(files: List[str], repo_root: Optional[str] = None) -> str:
+        """Extracts recent git diff for the specified files."""
+        valid_files = [f for f in files if f and os.path.exists(f)]
+        if not valid_files:
+            return ""
+        try:
+            cwd = repo_root or os.path.dirname(os.path.abspath(valid_files[0]))
+            cmd = ["git", "diff", "HEAD~1", "--"] + valid_files
+            res = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=5)
+            if res.returncode == 0 and res.stdout.strip():
+                return res.stdout.strip()
+            # Fallback to uncommitted git diff
+            cmd_uncommitted = ["git", "diff", "--"] + valid_files
+            res2 = subprocess.run(cmd_uncommitted, cwd=cwd, capture_output=True, text=True, timeout=5)
+            if res2.returncode == 0 and res2.stdout.strip():
+                return res2.stdout.strip()
+        except Exception:
+            pass
+        return ""
+

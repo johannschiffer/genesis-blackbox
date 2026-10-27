@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "genesis-blackbox"
-version = "0.1.0"
+version = "0.2.0"
 description = "Deterministic Runtime Flight Recorder & AST Blast-Radius Causal Crash Compiler for AI-Assisted Software Engineering"
 readme = "README.md"
 requires-python = ">=3.10"

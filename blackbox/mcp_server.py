@@ -3,6 +3,7 @@ Genesis Blackbox: Model Context Protocol (MCP) Server
 Exposes runtime flight recorder and blast-radius diagnostic tools to AI coding agents over stdio.
 """
 
+import os
 import sys
 import json
 import logging
@@ -16,72 +17,135 @@ logger = logging.getLogger("BlackboxMCPServer")
 
 
 class BlackboxMCPServer:
-    def __init__(self, db_path: str = "/tmp/genesis_blackbox.db"):
+    def __init__(self, db_path: str = ".blackbox/wal.sqlite"):
+        self.default_db_path = db_path
         self.wal_ring = WalRingBuffer(db_path=db_path)
         self.ast_graph = CodebaseGraph()
         self.compiler = CausalCrashCompiler(self.wal_ring, self.ast_graph)
         self.name = "genesis-blackbox"
-        self.version = "0.1.0"
+        self.version = "0.2.0"
         self._init_tools()
 
     def _init_tools(self):
         self.tools = {
-            "blackbox_record_event": {
-                "name": "blackbox_record_event",
+            "get_crash_autopsy": {
+                "name": "get_crash_autopsy",
+                "description": "Returns compiled .blackbox.md deterministic autopsy document from latest recorded crash in WAL.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "db_path": {
+                            "type": "string",
+                            "description": "Path to WAL SQLite database (default: .blackbox/wal.sqlite)",
+                            "default": ".blackbox/wal.sqlite"
+                        }
+                    }
+                },
+                "handler": lambda args: self.get_crash_autopsy(
+                    db_path=args.get("db_path", self.default_db_path)
+                )
+            },
+            "get_blast_radius": {
+                "name": "get_blast_radius",
+                "description": "Calculates upstream callers and downstream callee dependencies for a target file and symbol.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string", "description": "Source python file to analyze"},
+                        "symbol": {"type": "string", "description": "Target function or class name (optional)"}
+                    },
+                    "required": ["file_path"]
+                },
+                "handler": lambda args: self.get_blast_radius(
+                    file_path=args["file_path"],
+                    symbol=args.get("symbol")
+                )
+            },
+            "query_execution_timeline": {
+                "name": "query_execution_timeline",
+                "description": "Queries high-resolution execution timeline of HTTP, SQL, and exception events in WAL.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {"type": "integer", "description": "Maximum events to fetch (default: 50)"},
+                        "event_type": {"type": "string", "description": "Filter by event type (HTTP_REQ, SQL_QUERY, EXCEPTION, etc.)"}
+                    }
+                },
+                "handler": lambda args: self.query_execution_timeline(
+                    limit=args.get("limit", 50),
+                    event_type=args.get("event_type")
+                )
+            },
+            "record_event": {
+                "name": "record_event",
                 "description": "Records an execution event, HTTP transaction, or SQL query into the circular WAL flight recorder.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "event_type": {"type": "string", "description": "Type of event: HTTP_REQ, SQL_QUERY, LOG, etc."},
+                        "event_type": {"type": "string", "description": "Event type: HTTP_REQ, SQL_QUERY, LOG, etc."},
                         "payload": {"type": "object", "description": "JSON event payload"},
                         "source": {"type": "string", "description": "Source module name (default: 'agent')"}
                     },
                     "required": ["event_type", "payload"]
                 },
-                "handler": self._tool_record_event
-            },
-            "blackbox_query_timeline": {
-                "name": "blackbox_query_timeline",
-                "description": "Retrieves the recent execution flight recorder timeline leading up to an anomaly or crash.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "limit": {"type": "integer", "description": "Maximum events to fetch (default: 50)"}
-                    }
-                },
-                "handler": self._tool_query_timeline
-            },
-            "blackbox_blast_radius": {
-                "name": "blackbox_blast_radius",
-                "description": "Calculates upstream callers and downstream callee blast radius for a target function.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "target_function": {"type": "string", "description": "Function name to calculate blast radius for"}
-                    },
-                    "required": ["target_function"]
-                },
-                "handler": self._tool_blast_radius
+                "handler": lambda args: self.record_event(
+                    event_type=args["event_type"],
+                    payload=args["payload"],
+                    source=args.get("source", "agent")
+                )
             }
         }
+        # Register aliases for backwards compatibility
+        self.tools["blackbox_get_crash_autopsy"] = self.tools["get_crash_autopsy"]
+        self.tools["blackbox_blast_radius"] = self.tools["get_blast_radius"]
+        self.tools["blackbox_query_timeline"] = self.tools["query_execution_timeline"]
+        self.tools["blackbox_record_event"] = self.tools["record_event"]
 
-    def _tool_record_event(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        eid = self.wal_ring.record(
-            event_type=args["event_type"],
-            payload=args["payload"],
-            source=args.get("source", "agent")
-        )
+    def get_crash_autopsy(self, db_path: str = ".blackbox/wal.sqlite") -> str:
+        """Compiles and returns .blackbox.md autopsy markdown from WAL database."""
+        ring = self.wal_ring if db_path == self.default_db_path else WalRingBuffer(db_path=db_path)
+        compiler = CausalCrashCompiler(wal_ring=ring, ast_graph=self.ast_graph)
+        return compiler.compile()
+
+    def get_blast_radius(self, file_path: str, symbol: Optional[str] = None) -> Dict[str, Any]:
+        """Returns upstream and downstream blast radius for a symbol or file."""
+        if not os.path.isfile(file_path):
+            return {"error": f"File not found: {file_path}"}
+
+        self.ast_graph.parse_file(file_path)
+        if symbol:
+            return self.ast_graph.get_blast_radius(symbol, file_path=file_path)
+
+        nodes = [n for n, d in self.ast_graph.nodes.items() if d.get("filename") == file_path]
+        return {
+            "file": file_path,
+            "symbols_count": len(nodes),
+            "symbols": nodes,
+            "dependencies": {n: list(self.ast_graph.nodes[n].get("calls", [])) for n in nodes}
+        }
+
+    def query_execution_timeline(
+        self,
+        limit: int = 50,
+        event_type: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Queries recent flight recorder events with optional event_type filtering."""
+        events = self.wal_ring.query_recent(limit=limit, event_type=event_type)
+        return {
+            "total_events": len(events),
+            "filter": {"event_type": event_type, "limit": limit},
+            "events": events
+        }
+
+    def record_event(
+        self,
+        event_type: str,
+        payload: Any,
+        source: str = "agent"
+    ) -> Dict[str, Any]:
+        """Records an arbitrary event directly into WAL ring-buffer."""
+        eid = self.wal_ring.record(event_type=event_type, payload=payload, source=source)
         return {"status": "recorded", "event_id": eid}
-
-    def _tool_query_timeline(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        limit = args.get("limit", 50)
-        events = self.wal_ring.query_recent(limit=limit)
-        return {"total_events": len(events), "events": events}
-
-    def _tool_blast_radius(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        target = args["target_function"]
-        radius = self.ast_graph.get_blast_radius(target)
-        return radius
 
     def handle_request(self, req: Dict[str, Any]) -> Dict[str, Any]:
         method = req.get("method")
@@ -98,9 +162,15 @@ class BlackboxMCPServer:
                 }
             }
         elif method == "tools/list":
+            # List distinct primary tools
+            distinct = ["get_crash_autopsy", "get_blast_radius", "query_execution_timeline", "record_event"]
             tool_list = [
-                {"name": t["name"], "description": t["description"], "inputSchema": t["inputSchema"]}
-                for t in self.tools.values()
+                {
+                    "name": self.tools[k]["name"],
+                    "description": self.tools[k]["description"],
+                    "inputSchema": self.tools[k]["inputSchema"]
+                }
+                for k in distinct
             ]
             return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": tool_list}}
         elif method == "tools/call":
@@ -110,11 +180,12 @@ class BlackboxMCPServer:
             if name in self.tools:
                 try:
                     res = self.tools[name]["handler"](args)
+                    text_content = res if isinstance(res, str) else json.dumps(res, indent=2)
                     return {
                         "jsonrpc": "2.0",
                         "id": req_id,
                         "result": {
-                            "content": [{"type": "text", "text": json.dumps(res, indent=2)}]
+                            "content": [{"type": "text", "text": text_content}]
                         }
                     }
                 except Exception as e:
