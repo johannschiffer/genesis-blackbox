@@ -209,15 +209,9 @@ Add to `~/.codeium/windsurf/mcp_config.json`:
 
 ---
 
-## Support and Sponsorship
+## Support
 
-Genesis Blackbox is 100% free and open-source software under the MIT license.
-
-If this tool accelerates your development or helps your AI agents resolve bugs deterministically, consider supporting ongoing development:
-
-[![Support on Ko-fi](https://img.shields.io/badge/Support%20on-Ko--fi-ff5e5b.svg?style=for-the-badge)](https://ko-fi.com/johannschiffer)
-
-Support page: [https://ko-fi.com/johannschiffer](https://ko-fi.com/johannschiffer)
+If this tool is helpful for your workflow, you can support its maintenance on [Ko-fi](https://ko-fi.com/johannschiffer).
 
 ---
 

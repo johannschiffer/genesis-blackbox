@@ -25,7 +25,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="blackbox",
         description="Genesis Blackbox: Flight Recorder & AST Blast-Radius Engine",
-        epilog="100% Free & Open Source (MIT). Support development on Ko-fi: https://ko-fi.com/johannschiffer"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
