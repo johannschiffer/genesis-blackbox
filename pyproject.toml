@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "genesis-blackbox"
+version = "0.1.0"
+description = "Deterministic Runtime Flight Recorder & AST Blast-Radius Causal Crash Compiler for AI-Assisted Software Engineering"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Johann Schiffer" }]
+keywords = ["mcp", "debugging", "ast", "flight-recorder", "ai-agents", "sqlite-wal"]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0.0", "pytest-asyncio>=0.20.0"]
+
+[project.scripts]
+blackbox = "blackbox.cli:main"
+blackbox-mcp = "blackbox.mcp_server:main"
+
+[project.urls]
+Homepage = "https://johannschiffer.github.io"
+Repository = "https://github.com/johannschiffer/genesis-blackbox"
+"Support / Donate" = "https://ko-fi.com/johannschiffer"
