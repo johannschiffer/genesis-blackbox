@@ -54,6 +54,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     time_parser.add_argument("--db", default=".blackbox/wal.sqlite", help="Path to WAL database")
     time_parser.add_argument("--limit", type=int, default=20, help="Maximum events to display")
 
+    # Subcommand: ui
+    ui_parser = subparsers.add_parser("ui", help="Launch local timeline & crash autopsy web visualizer")
+    ui_parser.add_argument("--host", default="127.0.0.1", help="Host address (default: 127.0.0.1)")
+    ui_parser.add_argument("--port", type=int, default=8765, help="Port to listen on (default: 8765)")
+    ui_parser.add_argument("--db", default=".blackbox/wal.sqlite", help="Path to WAL database (default: .blackbox/wal.sqlite)")
+    ui_parser.add_argument("--no-browser", action="store_true", help="Do not automatically open browser")
+
     args = parser.parse_args(argv)
 
     if args.command == "record":
@@ -129,6 +136,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         for e in reversed(events):
             dur = f" ({e['duration_ms']:.2f}ms)" if e.get("duration_ms") is not None else ""
             print(f"#{e['id']} [{e['event_type']}] from {e['source']}{dur}: {e['payload']}")
+        return 0
+
+    elif args.command == "ui":
+        from .ui.server import start_ui_server
+        start_ui_server(
+            host=args.host,
+            port=args.port,
+            db_path=args.db,
+            open_browser=not args.no_browser,
+            run_forever=True
+        )
         return 0
 
     return 0

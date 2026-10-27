@@ -23,3 +23,5 @@ wheels/
 *.wal
 *.shm
 .DS_Store
+.blackbox/
+.blackbox.md
