@@ -14,6 +14,8 @@ from .sql_interceptor import (
     sanitize_sql_params
 )
 
+from .process_hook import SubprocessInterceptor, sanitize_command_and_args
+
 __all__ = [
     "WalRingBuffer",
     "ExceptionHook",
@@ -26,5 +28,8 @@ __all__ = [
     "SqlInterceptor",
     "TracedCursor",
     "SqlTraceContext",
-    "sanitize_sql_params"
+    "sanitize_sql_params",
+    "SubprocessInterceptor",
+    "sanitize_command_and_args"
 ]
+

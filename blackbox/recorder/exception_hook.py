@@ -228,3 +228,26 @@ class ExceptionHook:
         if self._original_excepthook:
             sys.excepthook = self._original_excepthook
             self._original_excepthook = None
+
+
+_active_exception_hook: Optional[ExceptionHook] = None
+
+
+def install_exception_hook(wal_ring: Optional[Any] = None) -> ExceptionHook:
+    """Installs global exception hook with the given or default WalRingBuffer."""
+    global _active_exception_hook
+    if _active_exception_hook is not None:
+        return _active_exception_hook
+    hook = ExceptionHook(wal_ring=wal_ring)
+    hook.install()
+    _active_exception_hook = hook
+    return hook
+
+
+def uninstall_exception_hook() -> None:
+    """Restores original sys.excepthook if installed."""
+    global _active_exception_hook
+    if _active_exception_hook is not None:
+        _active_exception_hook.uninstall()
+        _active_exception_hook = None
+

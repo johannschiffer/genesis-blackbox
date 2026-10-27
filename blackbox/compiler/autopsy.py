@@ -66,14 +66,17 @@ class CausalCrashCompiler:
         # Classify recent events
         http_events: List[Dict[str, Any]] = []
         sql_events: List[Dict[str, Any]] = []
+        subprocess_events: List[Dict[str, Any]] = []
         other_events: List[Dict[str, Any]] = []
 
         for e in recent_events:
             etype = e.get("event_type", "")
-            if etype in ("HTTP_REQ", "HTTP_CLIENT", "HTTP_RESP"):
+            if etype in ("HTTP_REQ", "HTTP_CLIENT", "HTTP_RESP", "http_transaction"):
                 http_events.append(e)
-            elif etype in ("SQL_QUERY", "SQL_EXEC"):
+            elif etype in ("SQL_QUERY", "SQL_EXEC", "sql_query"):
                 sql_events.append(e)
+            elif etype in ("SUBPROCESS", "subprocess", "SUBPROCESS_START", "SUBPROCESS_EXIT"):
+                subprocess_events.append(e)
             elif etype != "EXCEPTION":
                 other_events.append(e)
 
@@ -182,6 +185,33 @@ class CausalCrashCompiler:
                     rows = "-"
                     lat = "-"
                 md.append(f"| `{s.get('status', 'ok')}` | {lat} | `{query}` | `{params}` | {rows} |")
+            md.append("")
+
+        if subprocess_events:
+            md.append("### Recent Subprocess Executions")
+            md.append("| Command | Args | Exit Code | Latency | Status | Stderr / Details |")
+            md.append("|---|---|---|---|---|---|")
+            for sub in reversed(subprocess_events[:8]):
+                p = sub.get("payload") or {}
+                if isinstance(p, dict):
+                    cmd = p.get("command", "-")
+                    args_val = str(p.get("args", "-"))
+                    if len(args_val) > 40:
+                        args_val = args_val[:37] + "..."
+                    retcode = p.get("returncode", p.get("exit_code", sub.get("status", "0")))
+                    lat = f"{sub.get('duration_ms', 0):.2f}ms" if sub.get("duration_ms") is not None else "-"
+                    status = sub.get("status", "ok")
+                    stderr_val = str(p.get("stderr") or "-").replace("\n", " ")
+                    if len(stderr_val) > 40:
+                        stderr_val = stderr_val[:37] + "..."
+                else:
+                    cmd = str(p)[:20]
+                    args_val = "-"
+                    retcode = "-"
+                    lat = "-"
+                    status = sub.get("status", "ok")
+                    stderr_val = "-"
+                md.append(f"| `{cmd}` | `{args_val}` | `{retcode}` | {lat} | `{status}` | {stderr_val} |")
             md.append("")
 
         if recent_events:
