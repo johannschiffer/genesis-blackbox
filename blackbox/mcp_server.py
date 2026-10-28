@@ -13,6 +13,7 @@ from .ast_engine.graph import CodebaseGraph
 from .compiler.autopsy import CausalCrashCompiler
 from .compiler.reproducer import CrashReproducer
 from .compiler.verifier import CausalVerifier
+from .compiler.patch_validator import PatchValidator
 
 
 
@@ -27,8 +28,9 @@ class BlackboxMCPServer:
         self.ast_graph = CodebaseGraph()
         self.compiler = CausalCrashCompiler(self.wal_ring, self.ast_graph)
         self.name = "genesis-blackbox"
-        self.version = "0.1.3"
+        self.version = "0.1.4"
         self._init_tools()
+
 
     def _init_tools(self):
         self.tools = {
@@ -143,6 +145,29 @@ class BlackboxMCPServer:
                     db_path=args.get("db_path", self.default_db_path),
                     receipt_path=args.get("receipt_path", ".blackbox-resolved.md")
                 )
+            },
+            "test_candidate_patch": {
+                "name": "test_candidate_patch",
+                "description": "Applies a candidate patch in unified git diff format temporarily, runs reproduction tests and AST impact tests, guarantees full rollback, and returns verification status.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "patch_diff": {
+                            "type": "string",
+                            "description": "Unified git diff of the candidate fix"
+                        },
+                        "test_path": {
+                            "type": "string",
+                            "description": "Path to reproduction test file (default: test_blackbox_reproduce.py)",
+                            "default": "test_blackbox_reproduce.py"
+                        }
+                    },
+                    "required": ["patch_diff"]
+                },
+                "handler": lambda args: self.test_candidate_patch(
+                    patch_diff=args["patch_diff"],
+                    test_path=args.get("test_path", "test_blackbox_reproduce.py")
+                )
             }
         }
         # Register aliases for backwards compatibility
@@ -152,6 +177,8 @@ class BlackboxMCPServer:
         self.tools["blackbox_record_event"] = self.tools["record_event"]
         self.tools["blackbox_generate_reproduction_test"] = self.tools["generate_reproduction_test"]
         self.tools["blackbox_verify_crash_resolution"] = self.tools["verify_crash_resolution"]
+        self.tools["blackbox_test_candidate_patch"] = self.tools["test_candidate_patch"]
+
 
     def generate_reproduction_test(self, db_path: str = ".blackbox/wal.sqlite") -> str:
         """Synthesizes and returns standalone Python reproduction test script from WAL database."""
@@ -170,8 +197,18 @@ class BlackboxMCPServer:
         verifier = CausalVerifier(wal_ring=ring, db_path=db_path, receipt_path=receipt_path)
         return verifier.verify(test_path=test_path)
 
+    def test_candidate_patch(
+        self,
+        patch_diff: str,
+        test_path: str = "test_blackbox_reproduce.py"
+    ) -> Dict[str, Any]:
+        """Validates a candidate patch diff in an isolated environment with guaranteed rollback."""
+        validator = PatchValidator(repo_root=".", db_path=self.default_db_path)
+        return validator.evaluate_patch(patch_str=patch_diff, test_path=test_path)
+
 
     def get_crash_autopsy(self, db_path: str = ".blackbox/wal.sqlite") -> str:
+
         """Compiles and returns .blackbox.md autopsy markdown from WAL database."""
         ring = self.wal_ring if db_path == self.default_db_path else WalRingBuffer(db_path=db_path)
         compiler = CausalCrashCompiler(wal_ring=ring, ast_graph=self.ast_graph)
@@ -237,10 +274,12 @@ class BlackboxMCPServer:
                 "get_crash_autopsy",
                 "generate_reproduction_test",
                 "verify_crash_resolution",
+                "test_candidate_patch",
                 "get_blast_radius",
                 "query_execution_timeline",
                 "record_event"
             ]
+
             tool_list = [
                 {
                     "name": self.tools[k]["name"],

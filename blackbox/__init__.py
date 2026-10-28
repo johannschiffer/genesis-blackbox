@@ -2,7 +2,7 @@
 Genesis Blackbox: Flight Recorder & AST Blast-Radius Causal Crash Compiler.
 """
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 __author__ = "Johann Schiffer / Project Genesis"
 __license__ = "MIT"
 
@@ -14,9 +14,11 @@ from .recorder.process_hook import SubprocessInterceptor
 from .instrumentation import auto_instrument
 from .integrations import instrument_fastapi, instrument_flask, instrument_engine
 from .ast_engine.graph import CodebaseGraph
+from .ast_engine.impact import ImpactTestSelector
 from .compiler.autopsy import CausalCrashCompiler
 from .compiler.reproducer import CrashReproducer
 from .compiler.verifier import CausalVerifier
+from .compiler.patch_validator import PatchValidator
 from .ci.github_summary import export_github_step_summary
 from .mcp_server import BlackboxMCPServer
 
@@ -39,11 +41,14 @@ __all__ = [
     "instrument_flask",
     "instrument_engine",
     "CodebaseGraph",
+    "ImpactTestSelector",
     "CausalCrashCompiler",
     "CrashReproducer",
     "CausalVerifier",
+    "PatchValidator",
     "export_github_step_summary",
     "BlackboxMCPServer"
 ]
+
 
 

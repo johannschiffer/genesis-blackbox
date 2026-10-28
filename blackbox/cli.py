@@ -85,7 +85,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     ci_parser.add_argument("--autopsy", default=".blackbox.md", help="Path to autopsy capsule file (default: .blackbox.md)")
     ci_parser.add_argument("--output", help="Output summary file path (default: $GITHUB_STEP_SUMMARY or stdout)")
 
+    # Subcommand: test-impact
+    impact_parser = subparsers.add_parser("test-impact", help="Select and run only tests impacted by code modifications")
+    impact_parser.add_argument("--diff", action="store_true", default=True, help="Derive modified files from git diff (default: True)")
+    impact_parser.add_argument("--files", nargs="*", default=None, help="Explicit file paths to analyze")
+    impact_parser.add_argument("--run", action="store_true", default=False, help="Automatically run impacted tests with pytest")
+    impact_parser.add_argument("--root", default=".", help="Project root directory (default: .)")
+
     args = parser.parse_args(argv)
+
 
     if args.command == "record":
         cmd = args.target_command
@@ -237,7 +245,30 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(summary_md)
         return 0
 
+    elif args.command == "test-impact":
+        from .ast_engine.impact import ImpactTestSelector
+        selector = ImpactTestSelector(root_dir=args.root)
+        impacted = selector.find_impacted_tests(files=args.files, diff=args.diff)
+        if not impacted:
+            print("[Genesis-Blackbox] No impacted tests found for specified changes.")
+            return 0
+
+        print(f"[Genesis-Blackbox] Impacted tests ({len(impacted)}):")
+        for t in impacted:
+            print(f" - {t}")
+
+        if args.run:
+            print(f"[Genesis-Blackbox] Running {len(impacted)} impacted test(s)...")
+            res = selector.run_impacted_tests(impacted)
+            if res.stdout:
+                print(res.stdout)
+            if res.stderr:
+                print(res.stderr, file=sys.stderr)
+            return res.returncode
+        return 0
+
     return 0
+
 
 
 
