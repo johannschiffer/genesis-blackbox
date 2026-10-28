@@ -244,7 +244,8 @@ class SqlInterceptor:
 
             @event.listens_for(engine, "handle_error")
             def handle_error(exception_context):
-                start = exception_context.connection.info.pop("bb_sql_start", time.perf_counter())
+                conn_obj = getattr(exception_context, "connection", None)
+                start = conn_obj.info.pop("bb_sql_start", time.perf_counter()) if conn_obj is not None else time.perf_counter()
                 duration_ms = (time.perf_counter() - start) * 1000.0
 
                 self.wal_ring.record(

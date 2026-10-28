@@ -115,17 +115,18 @@ class CausalCrashCompiler:
             md.append(f"**Culprit Statement:** `{root_cause.get('code_line').strip()}`")
         md.append("")
 
-        # Section 1: Local Variables State
         md.append("## 1. Local Variable State at Crash Time")
         locals_dict = root_cause.get("locals", {})
         if locals_dict:
             md.append("| Variable | Value |")
             md.append("|---|---|")
             for k, v in locals_dict.items():
+                key_cell = str(k).replace("\n", " ").replace("|", "\\|")
                 val_str = str(v).replace("\n", " ")
                 if len(val_str) > 80:
                     val_str = val_str[:77] + "..."
-                md.append(f"| `{k}` | `{val_str}` |")
+                val_cell = val_str.replace("|", "\\|")
+                md.append(f"| `{key_cell}` | `{val_cell}` |")
         else:
             md.append("*No local variable bindings captured for root cause frame.*")
         md.append("")
@@ -232,9 +233,8 @@ class CausalCrashCompiler:
             md.append("*No preceding events found in WAL.*")
             md.append("")
 
-        # Section 3: Traceback Stack Frames
         if len(frames) > 1:
-            md.append("## 3. Execution Stack Trace Frames")
+            md.append("## 4. Execution Stack Trace Frames")
             for i, f in enumerate(frames):
                 is_culprit = " (CRASH POINT)" if f == root_cause else ""
                 md.append(f"### Frame {i + 1}: `{f.get('function')}()` in `{f.get('filename')}:{f.get('lineno')}`{is_culprit}")
@@ -247,18 +247,6 @@ class CausalCrashCompiler:
                     md.append(f"- **Locals:** {', '.join(local_strs)}")
                 md.append("")
 
-        # Section 4: AST Blast-Radius Impact
-        if blast_radius and blast_radius.get("total_blast_radius", 0) > 0:
-            md.append("## 4. AST Blast-Radius Impact")
-            md.append(f"- **Target Function:** `{blast_radius.get('target')}`")
-            upstream = blast_radius.get("upstream_callers", [])
-            downstream = blast_radius.get("downstream_callees", [])
-            md.append(f"- **Upstream Callers ({len(upstream)}):** {', '.join(f'`{c}`' for c in upstream) or 'None'}")
-            md.append(f"- **Downstream Callees ({len(downstream)}):** {', '.join(f'`{c}`' for c in downstream) or 'None'}")
-            md.append(f"- **Total Impacted Symbols:** `{blast_radius.get('total_blast_radius')}`")
-            md.append("")
-
-        # Section 5: Recent Git Changes
         if git_diff_text:
             md.append("## 5. Recent Git Diff in Involved Files")
             md.append("```diff")

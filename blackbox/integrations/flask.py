@@ -5,7 +5,7 @@ Attaches WSGI flight recorder middleware, request teardown listeners, and except
 
 from typing import Any
 from ..recorder.wal_ring import WalRingBuffer
-from ..recorder.exception_hook import install_exception_hook
+from ..recorder.exception_hook import ExceptionHook, install_exception_hook
 from ..recorder.http_interceptor import BlackboxWSGIMiddleware
 from ..recorder.process_hook import SubprocessInterceptor
 
@@ -23,12 +23,21 @@ def instrument_flask(app: Any, wal_path: str = ".blackbox/wal.sqlite", **kwargs)
     SubprocessInterceptor.install_global(wal_ring=wal_ring)
 
     if hasattr(app, "wsgi_app"):
+        if hasattr(app, "extensions") and isinstance(app.extensions, dict):
+            app.extensions["blackbox_wal"] = wal_ring
         app.wsgi_app = BlackboxWSGIMiddleware(app.wsgi_app, wal_ring=wal_ring, **kwargs)
 
         if hasattr(app, "teardown_request") and callable(app.teardown_request):
+            exc_recorder = ExceptionHook(wal_ring=wal_ring)
+
             @app.teardown_request
             def _blackbox_teardown(exception=None):
-                pass
+                if exception is not None and not getattr(exception, "_blackbox_recorded", False):
+                    try:
+                        setattr(exception, "_blackbox_recorded", True)
+                    except Exception:
+                        pass
+                    exc_recorder.handle_exception(type(exception), exception, exception.__traceback__)
 
         return app
 

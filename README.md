@@ -1,24 +1,27 @@
 # Genesis Blackbox
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![PyPI version](https://img.shields.io/pypi/v/genesis-blackbox.svg)](https://pypi.org/project/genesis-blackbox/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Support on Ko-fi](https://img.shields.io/badge/Support%20on-Ko--fi-ff5e5b.svg)](https://ko-fi.com/johannschiffer)
 
-Deterministic Runtime Flight Recorder and AST Blast-Radius Causal Crash Compiler for AI-assisted engineering and autonomous coding agents.
+Deterministic runtime flight recorder and AST blast-radius causal crash compiler for Python services and coding agents.
 
 ---
 
 ## Overview
 
-When coding agents (Claude, Cursor, Windsurf) encounter runtime crashes, standard stack traces leave them guessing. They lack the execution history leading up to the error, the local variable state across stack frames, and the static dependency blast radius.
+When coding agents (Claude Code, Cursor, Windsurf) encounter runtime failures, plain stack traces omit the HTTP/SQL/subprocess events that preceded the error, the local variable bindings inside each frame, and the static call-graph impact of a proposed fix.
 
-**Genesis Blackbox** captures execution context with sub-millisecond overhead:
-1. **SQLite WAL Ring-Buffer (`wal_ring.py`):** Circular bounded log for HTTP requests, SQL queries with sanitized parameters, and subprocess activity.
-2. **Deep Exception Serializer (`exception_hook.py`):** Automatically captures local variables per frame at crash time with circular-reference safety and credential redaction.
-3. **AST Blast-Radius Engine (`ast_engine/`):** Static call-graph analyzer that maps upstream callers and downstream callee dependencies.
-4. **Causal Crash Compiler (`compiler/`):** Synthesizes timeline events, frame variables, and AST blast radius into a self-contained `.blackbox.md` Autopsy Capsule.
-5. **Native MCP Server (`mcp_server.py`):** Direct Model Context Protocol interface exposing timeline queries, crash autopsies, and blast-radius tools over stdio.
-6. **Embedded Visual Timeline (`ui/`):** Lightweight local web inspector for timeline events and crash autopsies.
+`genesis-blackbox` records runtime context with zero external runtime dependencies:
+
+1. **SQLite WAL Ring-Buffer (`wal_ring.py`):** Bounded circular log for HTTP transactions, SQL queries with redacted bind parameters, subprocess invocations, and exceptions.
+2. **Deep Exception Serializer (`exception_hook.py`):** Captures per-frame local variable scopes across `sys.excepthook` and `threading.excepthook` with circular-reference bounds and secret redaction.
+3. **Zero-Config & Framework Instrumentation (`instrumentation.py`, `integrations/`):** Drop-in `auto_instrument()` plus idiomatic adapters for FastAPI/Starlette (ASGI), Flask (WSGI), sqlite3/DB-API, and SQLAlchemy.
+4. **AST Blast-Radius & Impact Selector (`ast_engine/`):** Static call-graph analyzer that computes upstream callers, downstream callees, and impacted pytest files for modified code.
+5. **Causal Crash Compiler, Reproducer & Patch Validator (`compiler/`):** Compiles `.blackbox.md` autopsy capsules, synthesizes standalone pytest reproduction scripts, validates candidate `git diff` patches with guaranteed rollback, and writes `.blackbox-resolved.md` verification receipts.
+6. **Pytest Plugin & GitHub Actions Summary (`pytest_plugin.py`, `ci/`):** Native `pytest --blackbox` hook and collapsible `$GITHUB_STEP_SUMMARY` Markdown exporter.
+7. **Native MCP Server & Local Web Inspector (`mcp_server.py`, `ui/`):** Stdio MCP server (`blackbox-mcp`) exposing 7 diagnostic tools alongside a zero-dependency localhost timeline viewer.
 
 ---
 
@@ -28,55 +31,23 @@ When coding agents (Claude, Cursor, Windsurf) encounter runtime crashes, standar
 flowchart LR
     subgraph Runtime ["Runtime Interceptors"]
         HTTP["HTTP (ASGI / WSGI)"]
-        SQL["SQL (sqlite3 / DBAPI)"]
+        SQL["SQL (DB-API / SQLAlchemy)"]
+        PROC["Subprocess & Exceptions"]
     end
 
-    WAL[("SQLite WAL Ring-Buffer<br/>(Sub-ms Circular Store)")]
-    AST["AST Blast-Radius Engine<br/>(Static Call Graph)"]
+    WAL[("SQLite WAL Ring-Buffer")]
+    AST["AST Blast-Radius & Impact Engine"]
     Compiler["Causal Crash Compiler"]
-    Capsule[(".blackbox.md<br/>Autopsy Capsule")]
-    AIAgent["AI Agent 1-Shot Fix<br/>(Claude, Cursor, Windsurf)"]
+    Capsule[(".blackbox.md + Reproducer Test")]
+    Validator["Patch Validator & Receipt Verifier"]
 
     HTTP --> WAL
     SQL --> WAL
+    PROC --> WAL
     WAL --> Compiler
     AST --> Compiler
     Compiler --> Capsule
-    Capsule --> AIAgent
-```
-
-```text
-+-------------------------------------------------+
-|              Runtime Interceptors               |
-|      ASGI / WSGI Middleware & SQL Drivers       |
-+------------------------+------------------------+
-                         |
-                         v
-+-------------------------------------------------+
-|             SQLite WAL Ring-Buffer              |
-|        (Sub-ms Overhead, Circular Pruning)      |
-+------------------------+------------------------+
-                         |                  +-----------------------------+
-                         |                  |   AST Blast-Radius Engine   |
-                         |                  |   (Static Call Graph Nodes) |
-                         +--------+---------+--------------+--------------+
-                                  |                        |
-                                  v                        v
-                         +------------------------------------------------+
-                         |             Causal Crash Compiler              |
-                         +------------------------+-----------------------+
-                                                  |
-                                                  v
-                         +------------------------------------------------+
-                         |              .blackbox.md Capsule              |
-                         |     (Timeline + Frame State + Blast Radius)    |
-                         +------------------------+-----------------------+
-                                                  |
-                                                  v
-                         +------------------------------------------------+
-                         |        AI Agent 1-Shot Deterministic Fix       |
-                         |           (Claude, Cursor, Windsurf)           |
-                         +------------------------------------------------+
+    Capsule --> Validator
 ```
 
 ---
@@ -89,119 +60,101 @@ flowchart LR
 pip install genesis-blackbox
 ```
 
-For development dependencies (pytest, pytest-asyncio, build, twine):
-
-```bash
-pip install genesis-blackbox[dev]
-```
-
-### 2. Frictionless Recording
-
-Execute any Python entrypoint or microservice under the flight recorder wrapper:
+### 2. Record Any Python Command or Service
 
 ```bash
 blackbox record -- python app.py
 ```
 
-The flight recorder automatically:
-- Initializes a local bounded SQLite WAL ring buffer at `.blackbox/wal.sqlite`.
-- Hooks `sys.excepthook` and `threading.excepthook` for deep variable serialization upon crash.
-- Redacts sensitive headers (Authorization, Cookie, API keys) and SQL credentials.
+Or attach inside application code with one line:
 
-You can also record custom events directly from the CLI or your code:
+```python
+from blackbox import auto_instrument
 
-```bash
-blackbox record --type HTTP_REQ --payload '{"path": "/api/users", "status": 500, "error": "DatabaseTimeout"}'
+auto_instrument(db_path=".blackbox/wal.sqlite")
 ```
 
-### 3. Visual Inspection
+Framework-specific helpers are also included:
 
-Launch the embedded local web inspector to explore recent events, execution timelines, and crash autopsy capsules:
+```python
+from blackbox import instrument_fastapi, instrument_flask, instrument_engine
 
-```bash
-blackbox ui --port 8765
+instrument_fastapi(fastapi_app)
+instrument_flask(flask_app)
+instrument_engine(sqlalchemy_engine)
 ```
 
-Navigate to `http://127.0.0.1:8765` in your browser.
+### 3. Pytest Plugin & Impact Test Selection
 
-### 4. Causal Autopsy Generation
-
-Generate a complete Markdown autopsy document from the latest recorded crash:
+Capture autopsies and standalone reproduction scripts automatically on test failures:
 
 ```bash
+pytest --blackbox
+```
+
+Select and execute only the tests affected by modified source symbols:
+
+```bash
+blackbox test-impact --diff --run
+```
+
+### 4. Compile Autopsies, Reproduce, and Verify Fixes
+
+```bash
+# Compile .blackbox.md from the latest crash in .blackbox/wal.sqlite
 blackbox autopsy
-```
 
-This compiles `.blackbox.md` in the current directory with:
-- Target exception class, message, and formatted traceback.
-- Local variables across each stack frame.
-- Recent execution timeline leading to the crash.
-- AST blast-radius analysis showing impacted callers and callees.
+# Synthesize a standalone pytest reproduction script
+blackbox reproduce --output test_blackbox_reproduce.py
 
-To inspect the recent execution timeline via CLI:
+# Run the reproduction test and emit .blackbox-resolved.md once fixed
+blackbox verify --test test_blackbox_reproduce.py
 
-```bash
-blackbox timeline --limit 20
-```
+# Export collapsible Markdown to GitHub Actions $GITHUB_STEP_SUMMARY
+blackbox ci-summary --autopsy .blackbox.md
 
-To run a blast-radius calculation on a file or specific symbol:
+# Initialize agent workflow rules (.cursorrules, CLAUDE.md, or .windsurfrules)
+blackbox init-rules --type claude
 
-```bash
-blackbox blast-radius app.py --symbol handle_request
+# Launch the localhost timeline and autopsy web inspector
+blackbox ui --port 8765 --no-browser
 ```
 
 ---
 
 ## MCP Server Configuration
 
-Genesis Blackbox includes a native Model Context Protocol (MCP) server (`blackbox.mcp_server`) exposing diagnostic tools directly to AI coding agents.
+`genesis-blackbox` ships the `blackbox-mcp` stdio server exposing 7 MCP tools:
 
-Exposed MCP tools:
 - `get_crash_autopsy`: Compiles `.blackbox.md` from recorded WAL events.
-- `get_blast_radius`: Analyzes upstream and downstream code dependencies.
-- `query_execution_timeline`: Queries recent HTTP, SQL, and exception events.
-- `record_event`: Ingests custom execution events into the WAL ring buffer.
+- `generate_reproduction_test`: Synthesizes an executable pytest reproduction script from the latest recorded exception.
+- `verify_crash_resolution`: Executes the reproduction test and emits `.blackbox-resolved.md` when resolved.
+- `test_candidate_patch`: Evaluates a unified `git diff` against reproduction and AST-impacted tests with automatic rollback.
+- `get_blast_radius`: Computes upstream callers and downstream callees for a Python file or symbol.
+- `query_execution_timeline`: Queries recent HTTP, SQL, subprocess, and exception events.
+- `record_event`: Appends structured execution telemetry to the circular WAL buffer.
 
-### Claude Desktop
-
-Add to your `claude_desktop_config.json`:
+### Claude Desktop / Cursor / Windsurf
 
 ```json
 {
   "mcpServers": {
     "blackbox": {
-      "command": "python",
-      "args": ["-m", "blackbox.mcp_server"]
+      "command": "uvx",
+      "args": ["--from", "genesis-blackbox", "blackbox-mcp"]
     }
   }
 }
 ```
 
-### Cursor
-
-Add to your `.cursor/mcp.json`:
+If installed into an active virtual environment, you can invoke `blackbox-mcp` directly:
 
 ```json
 {
   "mcpServers": {
     "blackbox": {
-      "command": "python",
-      "args": ["-m", "blackbox.mcp_server"]
-    }
-  }
-}
-```
-
-### Windsurf
-
-Add to `~/.codeium/windsurf/mcp_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "blackbox": {
-      "command": "python",
-      "args": ["-m", "blackbox.mcp_server"]
+      "command": "blackbox-mcp",
+      "args": ["--db", ".blackbox/wal.sqlite"]
     }
   }
 }
@@ -211,11 +164,10 @@ Add to `~/.codeium/windsurf/mcp_config.json`:
 
 ## Support
 
-If this tool is helpful for your workflow, you can support its maintenance on [Ko-fi](https://ko-fi.com/johannschiffer).
+If this project is useful in your engineering workflow, you can support ongoing open-source maintenance on [Ko-fi](https://ko-fi.com/johannschiffer).
 
 ---
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
-Copyright (c) Johann Schiffer.
+Licensed under the [MIT License](LICENSE). Copyright (c) Johann Schiffer.

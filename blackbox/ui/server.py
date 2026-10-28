@@ -4,282 +4,557 @@ Zero external dependencies. Powered by Python standard library http.server.
 """
 
 import os
-import sys
 import json
 import urllib.parse
-import threading
 import webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from typing import Optional
 
+from .. import __version__
 from ..recorder.wal_ring import WalRingBuffer
 from ..ast_engine.graph import CodebaseGraph
 from ..compiler.autopsy import CausalCrashCompiler
 
 
 EMBEDDED_HTML = """<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Genesis Blackbox: Flight Recorder & Causal Autopsy</title>
+  <title>Genesis Blackbox: Flight Recorder &amp; Causal Autopsy</title>
   <style>
-    :root {
+    :root,
+    [data-theme="dark"] {
       --bg: #0d1117;
-      --card-bg: #161b22;
+      --surface: #151b23;
+      --surface-subtle: #1b222c;
+      --code-bg: #090d13;
       --border: #30363d;
-      --text: #c9d1d9;
-      --text-muted: #8b949e;
-      --accent: #58a6ff;
-      --danger: #f85149;
-      --success: #3fb950;
-      --warning: #d29922;
-      --purple: #bc8cff;
+      --text: #e6edf3;
+      --text-muted: #9da7b3;
+      --accent: #79c0ff;
+      --btn-bg: #212830;
+      --btn-hover: #2d3642;
+      --danger-bg: #2d1215;
+      --danger-border: #8e2a32;
+      --danger-text: #ffa198;
+      --ok-bg: #0f2419;
+      --ok-border: #26663b;
+      --ok-text: #56d364;
+      --tag-http-bg: #12263f;
+      --tag-http-text: #79c0ff;
+      --tag-sql-bg: #0f2419;
+      --tag-sql-text: #56d364;
+      --tag-exc-bg: #2d1215;
+      --tag-exc-text: #ffa198;
+      --tag-sys-bg: #241b35;
+      --tag-sys-text: #d2a8ff;
     }
+
+    [data-theme="light"] {
+      --bg: #f6f8fa;
+      --surface: #ffffff;
+      --surface-subtle: #f0f3f6;
+      --code-bg: #f0f3f6;
+      --border: #d0d7de;
+      --text: #1f2328;
+      --text-muted: #57606a;
+      --accent: #0969da;
+      --btn-bg: #f0f3f6;
+      --btn-hover: #e4e9ee;
+      --danger-bg: #ffebe9;
+      --danger-border: #f5b3b0;
+      --danger-text: #a40e26;
+      --ok-bg: #dafbe1;
+      --ok-border: #82e29b;
+      --ok-text: #116329;
+      --tag-http-bg: #ddf4ff;
+      --tag-http-text: #0550ae;
+      --tag-sql-bg: #dafbe1;
+      --tag-sql-text: #116329;
+      --tag-exc-bg: #ffebe9;
+      --tag-exc-text: #a40e26;
+      --tag-sys-bg: #fbefff;
+      --tag-sys-text: #6639ba;
+    }
+
     * { box-sizing: border-box; margin: 0; padding: 0; }
+
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       background: var(--bg);
       color: var(--text);
       line-height: 1.5;
-      padding: 20px;
+      padding: 16px;
+      min-height: 100vh;
+      overflow-x: hidden;
     }
+
+    @media (min-width: 768px) {
+      body { padding: 24px; }
+    }
+
+    .shell {
+      max-width: 1440px;
+      margin: 0 auto;
+    }
+
     header {
       display: flex;
+      flex-wrap: wrap;
       justify-content: space-between;
       align-items: center;
-      padding-bottom: 20px;
+      gap: 12px;
+      padding-bottom: 16px;
       border-bottom: 1px solid var(--border);
-      margin-bottom: 24px;
+      margin-bottom: 20px;
     }
+
     .brand {
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
-      gap: 12px;
+      gap: 10px;
     }
+
     .brand h1 {
       font-size: 1.25rem;
       font-weight: 600;
       letter-spacing: -0.02em;
     }
+
     .badge-live {
-      background: rgba(63, 185, 80, 0.15);
-      color: var(--success);
-      border: 1px solid rgba(63, 185, 80, 0.4);
-      padding: 2px 8px;
-      border-radius: 12px;
+      background: var(--ok-bg);
+      color: var(--ok-text);
+      border: 1px solid var(--ok-border);
+      padding: 4px 10px;
+      border-radius: 6px;
       font-size: 0.75rem;
       font-weight: 600;
     }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .action-btn {
+      background: var(--btn-bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      min-height: 44px;
+      min-width: 44px;
+      padding: 8px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-weight: 500;
+      transition: background-color 120ms ease;
+    }
+
+    .action-btn:hover {
+      background: var(--btn-hover);
+    }
+
+    .action-btn:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .action-btn { transition: none; }
+    }
+
     .crash-banner {
-      background: rgba(248, 81, 73, 0.1);
-      border: 1px solid rgba(248, 81, 73, 0.3);
+      background: var(--danger-bg);
+      border: 1px solid var(--danger-border);
       border-radius: 8px;
       padding: 16px 20px;
-      margin-bottom: 24px;
+      margin-bottom: 20px;
     }
+
     .crash-banner.healthy {
-      background: rgba(63, 185, 80, 0.1);
-      border-color: rgba(63, 185, 80, 0.3);
+      background: var(--ok-bg);
+      border-color: var(--ok-border);
     }
+
     .crash-banner h2 {
       font-size: 1rem;
       font-weight: 600;
-      margin-bottom: 6px;
-      display: flex;
-      align-items: center;
-      gap: 8px;
+      margin-bottom: 4px;
+      color: var(--danger-text);
     }
+
+    .crash-banner.healthy h2 {
+      color: var(--ok-text);
+    }
+
+    .crash-desc {
+      color: var(--text);
+      font-size: 0.88rem;
+      overflow-wrap: anywhere;
+    }
+
     .grid {
       display: grid;
       grid-template-columns: 1fr;
-      gap: 24px;
+      gap: 20px;
     }
+
     @media (min-width: 1024px) {
-      .grid { grid-template-columns: 3fr 2fr; }
+      .grid { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
     }
+
     .card {
-      background: var(--card-bg);
+      background: var(--surface);
       border: 1px solid var(--border);
       border-radius: 8px;
       overflow: hidden;
+      min-width: 0;
     }
+
     .card-header {
       padding: 12px 16px;
       border-bottom: 1px solid var(--border);
       font-weight: 600;
-      font-size: 0.9rem;
+      font-size: 0.92rem;
       display: flex;
+      flex-wrap: wrap;
       justify-content: space-between;
       align-items: center;
+      gap: 10px;
     }
+
+    .meta-count {
+      font-size: 0.8rem;
+      font-weight: 500;
+      color: var(--text-muted);
+    }
+
     .timeline-table {
       width: 100%;
       border-collapse: collapse;
       font-size: 0.85rem;
+      table-layout: fixed;
     }
+
     .timeline-table th {
       text-align: left;
       padding: 10px 14px;
-      background: rgba(255, 255, 255, 0.02);
+      background: var(--surface-subtle);
       color: var(--text-muted);
       border-bottom: 1px solid var(--border);
+      font-weight: 600;
     }
+
+    .timeline-table th:nth-child(1) { width: 130px; }
+    .timeline-table th:nth-child(2) { width: 120px; }
+    .timeline-table th:nth-child(3) { width: 95px; }
+
     .timeline-table td {
       padding: 10px 14px;
       border-bottom: 1px solid var(--border);
       vertical-align: top;
+      overflow-wrap: anywhere;
     }
+
+    @media (max-width: 767px) {
+      .timeline-table thead {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        border: 0;
+      }
+      .timeline-table,
+      .timeline-table tbody,
+      .timeline-table tr,
+      .timeline-table td {
+        display: block;
+        width: 100%;
+      }
+      .timeline-table tr {
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--border);
+      }
+      .timeline-table td {
+        padding: 4px 0;
+        border-bottom: none;
+      }
+      .timeline-table td[data-label]::before {
+        content: attr(data-label) ": ";
+        font-weight: 600;
+        color: var(--text-muted);
+      }
+    }
+
+    .empty-cell {
+      text-align: center;
+      color: var(--text-muted);
+      padding: 24px 16px !important;
+    }
+
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    }
+
+    .muted {
+      color: var(--text-muted);
+    }
+
     .tag {
       display: inline-block;
-      padding: 2px 6px;
+      padding: 2px 7px;
       border-radius: 4px;
       font-size: 0.72rem;
       font-weight: 600;
       text-transform: uppercase;
+      letter-spacing: 0.02em;
     }
-    .tag-http { background: rgba(88, 166, 255, 0.2); color: var(--accent); }
-    .tag-sql { background: rgba(63, 185, 80, 0.2); color: var(--success); }
-    .tag-exc { background: rgba(248, 81, 73, 0.2); color: var(--danger); }
-    .tag-sys { background: rgba(188, 140, 255, 0.2); color: var(--purple); }
+
+    .tag-http { background: var(--tag-http-bg); color: var(--tag-http-text); }
+    .tag-sql { background: var(--tag-sql-bg); color: var(--tag-sql-text); }
+    .tag-exc { background: var(--tag-exc-bg); color: var(--tag-exc-text); }
+    .tag-sys { background: var(--tag-sys-bg); color: var(--tag-sys-text); }
+
     pre {
-      background: #090d13;
+      background: var(--code-bg);
+      color: var(--text);
+      border: 1px solid var(--border);
       padding: 12px;
       border-radius: 6px;
       font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
       font-size: 0.82rem;
       overflow-x: auto;
       white-space: pre-wrap;
-      word-break: break-all;
+      overflow-wrap: anywhere;
     }
+
     .autopsy-content {
       padding: 16px;
       max-height: 600px;
       overflow-y: auto;
     }
-    .refresh-btn {
-      background: var(--border);
-      color: var(--text);
-      border: none;
-      padding: 6px 12px;
-      border-radius: 6px;
-      cursor: pointer;
+
+    .sr-status {
       font-size: 0.8rem;
+      color: var(--text-muted);
+      margin-right: 6px;
     }
-    .refresh-btn:hover { background: #3c444d; }
   </style>
 </head>
 <body>
-  <header>
-    <div class="brand">
-      <h1>Genesis Blackbox</h1>
-      <span class="badge-live">Flight Recorder Live</span>
-    </div>
-    <div>
-      <button class="refresh-btn" onclick="fetchState()">Refresh Feed</button>
-    </div>
-  </header>
-
-  <div id="crash-banner" class="crash-banner">
-    <h2 id="crash-title">Analyzing Execution State...</h2>
-    <p id="crash-desc" style="color: var(--text-muted); font-size: 0.88rem;"></p>
-  </div>
-
-  <div class="grid">
-    <div class="card">
-      <div class="card-header">
-        <span>Execution Timeline (Latest Transactions)</span>
-        <span id="timeline-count" style="font-size: 0.75rem; color: var(--text-muted);">0 events</span>
+  <div class="shell">
+    <header>
+      <div class="brand">
+        <h1>Genesis Blackbox</h1>
+        <span id="conn-badge" class="badge-live">Flight Recorder Live</span>
       </div>
-      <table class="timeline-table">
-        <thead>
-          <tr>
-            <th>Type</th>
-            <th>Source</th>
-            <th>Duration</th>
-            <th>Summary / Payload</th>
-          </tr>
-        </thead>
-        <tbody id="timeline-body">
-          <tr><td colspan="4" style="text-align: center; color: var(--text-muted);">Loading timeline...</td></tr>
-        </tbody>
-      </table>
-    </div>
+      <div class="header-actions">
+        <button id="theme-btn" type="button" class="action-btn" aria-pressed="false" onclick="toggleTheme()">Light Theme</button>
+        <button id="refresh-btn" type="button" class="action-btn" onclick="fetchState()">Refresh Feed</button>
+      </div>
+    </header>
 
-    <div class="card">
-      <div class="card-header">
-        <span>Causal Crash Autopsy (.blackbox.md)</span>
-        <button class="refresh-btn" style="padding: 2px 8px;" onclick="copyAutopsy()">Copy</button>
+    <main>
+      <section id="crash-banner" class="crash-banner healthy" aria-live="polite">
+        <h2 id="crash-title">Loading Flight Recorder State...</h2>
+        <p id="crash-desc" class="crash-desc">Connecting to local SQLite WAL ring-buffer.</p>
+      </section>
+
+      <div class="grid">
+        <section class="card" aria-labelledby="timeline-heading">
+          <div class="card-header">
+            <span id="timeline-heading">Execution Timeline (Latest Transactions)</span>
+            <span id="timeline-count" class="meta-count">0 events</span>
+          </div>
+          <table class="timeline-table">
+            <thead>
+              <tr>
+                <th scope="col">Type</th>
+                <th scope="col">Source</th>
+                <th scope="col">Duration</th>
+                <th scope="col">Summary / Payload</th>
+              </tr>
+            </thead>
+            <tbody id="timeline-body">
+              <tr><td colspan="4" class="empty-cell">Loading timeline...</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="card" aria-labelledby="autopsy-heading">
+          <div class="card-header">
+            <span id="autopsy-heading">Causal Crash Autopsy (.blackbox.md)</span>
+            <div>
+              <span id="copy-status" class="sr-status" role="status" aria-live="polite"></span>
+              <button id="copy-btn" type="button" class="action-btn" onclick="copyAutopsy()">Copy Autopsy</button>
+            </div>
+          </div>
+          <div class="autopsy-content">
+            <pre id="autopsy-text">Compiling autopsy report...</pre>
+          </div>
+        </section>
       </div>
-      <div class="autopsy-content">
-        <pre id="autopsy-text">Compiling autopsy report...</pre>
-      </div>
-    </div>
+    </main>
   </div>
 
   <script>
+    (function initTheme() {
+      let saved = null;
+      try { saved = localStorage.getItem('blackbox-theme'); } catch (_) {}
+      const initial = saved || 'dark';
+      applyTheme(initial);
+    })();
+
+    function applyTheme(theme) {
+      const normalized = theme === 'light' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', normalized);
+      const btn = document.getElementById('theme-btn');
+      if (btn) {
+        const isLight = normalized === 'light';
+        btn.setAttribute('aria-pressed', isLight ? 'true' : 'false');
+        btn.textContent = isLight ? 'Dark Theme' : 'Light Theme';
+      }
+    }
+
+    function toggleTheme() {
+      const current = document.documentElement.getAttribute('data-theme') || 'dark';
+      const next = current === 'dark' ? 'light' : 'dark';
+      applyTheme(next);
+      try { localStorage.setItem('blackbox-theme', next); } catch (_) {}
+    }
+
+    function classifyTag(eventType) {
+      const upper = String(eventType || '').toUpperCase();
+      if (upper.startsWith('HTTP')) return 'tag-http';
+      if (upper.startsWith('SQL')) return 'tag-sql';
+      if (upper === 'EXCEPTION' || upper.includes('CRASH') || upper.includes('ERROR')) return 'tag-exc';
+      return 'tag-sys';
+    }
+
+    function renderEmptyRow(tbody, message) {
+      tbody.replaceChildren();
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = 4;
+      td.className = 'empty-cell';
+      td.textContent = message;
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    }
+
     async function fetchState() {
+      const banner = document.getElementById('crash-banner');
+      const badge = document.getElementById('conn-badge');
+      const tbody = document.getElementById('timeline-body');
       try {
         const [timeRes, autoRes] = await Promise.all([
           fetch('/api/timeline?limit=30'),
           fetch('/api/autopsy')
         ]);
+        if (!timeRes.ok || !autoRes.ok) {
+          throw new Error('HTTP ' + timeRes.status + '/' + autoRes.status);
+        }
         const timeData = await timeRes.json();
         const autoData = await autoRes.json();
 
-        // Render Autopsy
-        document.getElementById('autopsy-text').innerText = autoData.autopsy_markdown || 'No report available.';
+        badge.textContent = 'Flight Recorder Live';
+        document.getElementById('autopsy-text').textContent = autoData.autopsy_markdown || 'No report available.';
 
-        // Render Banner
-        const banner = document.getElementById('crash-banner');
         if (autoData.has_crash) {
           banner.className = 'crash-banner';
-          document.getElementById('crash-title').innerText = '🚨 Crash Detected: ' + (autoData.exception_type || 'Exception');
-          document.getElementById('crash-desc').innerText = (autoData.exception_message || '') + ' in ' + (autoData.culprit_file || 'unknown') + ':' + (autoData.culprit_line || '');
+          document.getElementById('crash-title').textContent = 'Crash Detected: ' + (autoData.exception_type || 'Exception');
+          document.getElementById('crash-desc').textContent =
+            (autoData.exception_message || '') +
+            ' in ' + (autoData.culprit_file || 'unknown') +
+            ':' + (autoData.culprit_line || '');
         } else {
           banner.className = 'crash-banner healthy';
-          document.getElementById('crash-title').innerText = 'Operational: Normal Execution State';
-          document.getElementById('crash-desc').innerText = 'No unhandled exceptions detected in the circular flight recorder WAL.';
+          document.getElementById('crash-title').textContent = 'Operational: Normal Execution State';
+          document.getElementById('crash-desc').textContent = 'No unhandled exceptions detected in the circular flight recorder WAL.';
         }
 
-        // Render Timeline
-        const events = timeData.events || [];
-        document.getElementById('timeline-count').innerText = events.length + ' events';
-        const tbody = document.getElementById('timeline-body');
+        const events = Array.isArray(timeData.events) ? timeData.events : [];
+        document.getElementById('timeline-count').textContent = events.length + (events.length === 1 ? ' event' : ' events');
         if (events.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; color:var(--text-muted);">No events recorded in WAL.</td></tr>';
+          renderEmptyRow(tbody, 'No events recorded in WAL.');
           return;
         }
 
-        tbody.innerHTML = events.map(e => {
-          let tagClass = 'tag-sys';
-          if (e.event_type.startsWith('HTTP')) tagClass = 'tag-http';
-          else if (e.event_type.startsWith('SQL')) tagClass = 'tag-sql';
-          else if (e.event_type === 'EXCEPTION') tagClass = 'tag-exc';
+        const fragment = document.createDocumentFragment();
+        for (const e of events) {
+          const tr = document.createElement('tr');
 
-          const dur = e.duration_ms ? e.duration_ms.toFixed(2) + 'ms' : '-';
-          let payloadStr = typeof e.payload === 'object' ? JSON.stringify(e.payload) : String(e.payload);
-          if (payloadStr.length > 90) payloadStr = payloadStr.substring(0, 87) + '...';
+          const tdType = document.createElement('td');
+          tdType.setAttribute('data-label', 'Type');
+          const spanTag = document.createElement('span');
+          spanTag.className = 'tag ' + classifyTag(e.event_type);
+          spanTag.textContent = String(e.event_type || 'EVENT');
+          tdType.appendChild(spanTag);
 
-          return `
-            <tr>
-              <td><span class="tag ${tagClass}">${e.event_type}</span></td>
-              <td style="color:var(--text-muted);">${e.source}</td>
-              <td style="font-family:ui-monospace, monospace;">${dur}</td>
-              <td style="font-family:ui-monospace, monospace;">${payloadStr}</td>
-            </tr>
-          `;
-        }).join('');
+          const tdSource = document.createElement('td');
+          tdSource.setAttribute('data-label', 'Source');
+          tdSource.className = 'muted';
+          tdSource.textContent = String(e.source || '-');
+
+          const tdDur = document.createElement('td');
+          tdDur.setAttribute('data-label', 'Duration');
+          tdDur.className = 'mono';
+          tdDur.textContent = (typeof e.duration_ms === 'number') ? e.duration_ms.toFixed(2) + 'ms' : '-';
+
+          const tdPayload = document.createElement('td');
+          tdPayload.setAttribute('data-label', 'Payload');
+          tdPayload.className = 'mono';
+          let payloadStr = (e.payload !== null && typeof e.payload === 'object')
+            ? JSON.stringify(e.payload)
+            : String(e.payload ?? '');
+          if (payloadStr.length > 110) {
+            payloadStr = payloadStr.substring(0, 107) + '...';
+          }
+          tdPayload.textContent = payloadStr;
+
+          tr.appendChild(tdType);
+          tr.appendChild(tdSource);
+          tr.appendChild(tdDur);
+          tr.appendChild(tdPayload);
+          fragment.appendChild(tr);
+        }
+        tbody.replaceChildren(fragment);
       } catch (err) {
-        console.error('Error fetching state:', err);
+        badge.textContent = 'Connection Offline';
+        banner.className = 'crash-banner';
+        document.getElementById('crash-title').textContent = 'Connection Error: Local WAL Server Unreachable';
+        document.getElementById('crash-desc').textContent = 'Could not fetch /api/timeline or /api/autopsy. Retrying automatically every 3 seconds.';
       }
     }
 
-    function copyAutopsy() {
-      const text = document.getElementById('autopsy-text').innerText;
-      navigator.clipboard.writeText(text);
-      alert('Autopsy capsule copied to clipboard.');
+    async function copyAutopsy() {
+      const text = document.getElementById('autopsy-text').textContent || '';
+      const statusEl = document.getElementById('copy-status');
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+        }
+        statusEl.textContent = 'Copied';
+      } catch (_) {
+        statusEl.textContent = 'Copy unavailable';
+      }
+      setTimeout(() => { statusEl.textContent = ''; }, 2500);
     }
 
     fetchState();
@@ -296,7 +571,6 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
 
 class BlackboxUIRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
-        # Silence default standard HTTP request logs to keep terminal output clean
         pass
 
     @property
@@ -327,10 +601,7 @@ class BlackboxUIRequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/status":
             self._handle_api_status()
         else:
-            self.send_response(404)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({"error": "Not Found"}).encode("utf-8"))
+            self._send_json({"error": "Not Found"}, status=404)
 
     def _serve_html(self):
         static_file = os.path.join(os.path.dirname(__file__), "static", "index.html")
@@ -346,6 +617,7 @@ class BlackboxUIRequestHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(data)
 
@@ -353,7 +625,7 @@ class BlackboxUIRequestHandler(BaseHTTPRequestHandler):
         limit = 50
         if "limit" in query:
             try:
-                limit = int(query["limit"][0])
+                limit = max(1, min(500, int(query["limit"][0])))
             except ValueError:
                 limit = 50
         event_type = query.get("event_type", [None])[0]
@@ -417,7 +689,7 @@ class BlackboxUIRequestHandler(BaseHTTPRequestHandler):
     def _handle_api_status(self):
         resp_data = {
             "status": "online",
-            "version": "0.2.0",
+            "version": __version__,
             "db_path": self.server.db_path
         }
         self._send_json(resp_data)
@@ -427,7 +699,13 @@ class BlackboxUIRequestHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        origin = self.headers.get("Origin", "")
+        if origin:
+            parsed_origin = urllib.parse.urlparse(origin)
+            if parsed_origin.hostname in ("127.0.0.1", "localhost", "::1"):
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Vary", "Origin")
         self.end_headers()
         self.wfile.write(body)
 

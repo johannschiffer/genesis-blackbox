@@ -150,10 +150,12 @@ class ImpactTestSelector:
             if base_name.startswith("test_") or base_name.endswith("_test.py"):
                 impacted_tests.add(f)
 
-        # Step 2: Extract symbols and module names from non-test targets
         source_symbols: Set[str] = set()
         source_modules: Set[str] = set()
         source_basenames: Set[str] = set()
+
+        if not self.graph.nodes:
+            self.graph.parse_directory(self.root_dir, max_files=200)
 
         for f in normalized_targets:
             base_no_ext = os.path.splitext(os.path.basename(f))[0]

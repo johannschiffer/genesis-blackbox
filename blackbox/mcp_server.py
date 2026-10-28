@@ -7,14 +7,16 @@ import os
 import sys
 import json
 import logging
+import argparse
+from contextlib import contextmanager
 from typing import Dict, Any, List, Optional
+from . import __version__
 from .recorder.wal_ring import WalRingBuffer
 from .ast_engine.graph import CodebaseGraph
 from .compiler.autopsy import CausalCrashCompiler
 from .compiler.reproducer import CrashReproducer
 from .compiler.verifier import CausalVerifier
 from .compiler.patch_validator import PatchValidator
-
 
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
@@ -28,9 +30,20 @@ class BlackboxMCPServer:
         self.ast_graph = CodebaseGraph()
         self.compiler = CausalCrashCompiler(self.wal_ring, self.ast_graph)
         self.name = "genesis-blackbox"
-        self.version = "0.1.4"
+        self.version = __version__
         self._init_tools()
 
+    @contextmanager
+    def _resolve_ring(self, db_path: Optional[str]):
+        target = db_path or self.default_db_path
+        if os.path.abspath(target) == os.path.abspath(self.default_db_path) or target == self.default_db_path:
+            yield self.wal_ring
+        else:
+            temp_ring = WalRingBuffer(db_path=target)
+            try:
+                yield temp_ring
+            finally:
+                temp_ring.close()
 
     def _init_tools(self):
         self.tools = {
@@ -74,12 +87,14 @@ class BlackboxMCPServer:
                     "type": "object",
                     "properties": {
                         "limit": {"type": "integer", "description": "Maximum events to fetch (default: 50)"},
-                        "event_type": {"type": "string", "description": "Filter by event type (HTTP_REQ, SQL_QUERY, EXCEPTION, etc.)"}
+                        "event_type": {"type": "string", "description": "Filter by event type (HTTP_REQ, SQL_QUERY, EXCEPTION, etc.)"},
+                        "db_path": {"type": "string", "description": "Optional path to WAL SQLite database"}
                     }
                 },
                 "handler": lambda args: self.query_execution_timeline(
                     limit=args.get("limit", 50),
-                    event_type=args.get("event_type")
+                    event_type=args.get("event_type"),
+                    db_path=args.get("db_path")
                 )
             },
             "record_event": {
@@ -90,14 +105,16 @@ class BlackboxMCPServer:
                     "properties": {
                         "event_type": {"type": "string", "description": "Event type: HTTP_REQ, SQL_QUERY, LOG, etc."},
                         "payload": {"type": "object", "description": "JSON event payload"},
-                        "source": {"type": "string", "description": "Source module name (default: 'agent')"}
+                        "source": {"type": "string", "description": "Source module name (default: 'agent')"},
+                        "db_path": {"type": "string", "description": "Optional path to WAL SQLite database"}
                     },
                     "required": ["event_type", "payload"]
                 },
                 "handler": lambda args: self.record_event(
                     event_type=args["event_type"],
                     payload=args["payload"],
-                    source=args.get("source", "agent")
+                    source=args.get("source", "agent"),
+                    db_path=args.get("db_path")
                 )
             },
             "generate_reproduction_test": {
@@ -170,7 +187,6 @@ class BlackboxMCPServer:
                 )
             }
         }
-        # Register aliases for backwards compatibility
         self.tools["blackbox_get_crash_autopsy"] = self.tools["get_crash_autopsy"]
         self.tools["blackbox_blast_radius"] = self.tools["get_blast_radius"]
         self.tools["blackbox_query_timeline"] = self.tools["query_execution_timeline"]
@@ -179,12 +195,11 @@ class BlackboxMCPServer:
         self.tools["blackbox_verify_crash_resolution"] = self.tools["verify_crash_resolution"]
         self.tools["blackbox_test_candidate_patch"] = self.tools["test_candidate_patch"]
 
-
     def generate_reproduction_test(self, db_path: str = ".blackbox/wal.sqlite") -> str:
         """Synthesizes and returns standalone Python reproduction test script from WAL database."""
-        ring = self.wal_ring if db_path == self.default_db_path else WalRingBuffer(db_path=db_path)
-        reproducer = CrashReproducer(wal_ring=ring)
-        return reproducer.generate()
+        with self._resolve_ring(db_path) as ring:
+            reproducer = CrashReproducer(wal_ring=ring)
+            return reproducer.generate()
 
     def verify_crash_resolution(
         self,
@@ -193,9 +208,9 @@ class BlackboxMCPServer:
         receipt_path: str = ".blackbox-resolved.md"
     ) -> Dict[str, Any]:
         """Runs the reproduction test and issues a resolution receipt if the crash is fixed."""
-        ring = self.wal_ring if db_path == self.default_db_path else WalRingBuffer(db_path=db_path)
-        verifier = CausalVerifier(wal_ring=ring, db_path=db_path, receipt_path=receipt_path)
-        return verifier.verify(test_path=test_path)
+        with self._resolve_ring(db_path) as ring:
+            verifier = CausalVerifier(wal_ring=ring, db_path=db_path, receipt_path=receipt_path)
+            return verifier.verify(test_path=test_path)
 
     def test_candidate_patch(
         self,
@@ -206,13 +221,11 @@ class BlackboxMCPServer:
         validator = PatchValidator(repo_root=".", db_path=self.default_db_path)
         return validator.evaluate_patch(patch_str=patch_diff, test_path=test_path)
 
-
     def get_crash_autopsy(self, db_path: str = ".blackbox/wal.sqlite") -> str:
-
         """Compiles and returns .blackbox.md autopsy markdown from WAL database."""
-        ring = self.wal_ring if db_path == self.default_db_path else WalRingBuffer(db_path=db_path)
-        compiler = CausalCrashCompiler(wal_ring=ring, ast_graph=self.ast_graph)
-        return compiler.compile()
+        with self._resolve_ring(db_path) as ring:
+            compiler = CausalCrashCompiler(wal_ring=ring, ast_graph=self.ast_graph)
+            return compiler.compile()
 
     def get_blast_radius(self, file_path: str, symbol: Optional[str] = None) -> Dict[str, Any]:
         """Returns upstream and downstream blast radius for a symbol or file."""
@@ -234,10 +247,12 @@ class BlackboxMCPServer:
     def query_execution_timeline(
         self,
         limit: int = 50,
-        event_type: Optional[str] = None
+        event_type: Optional[str] = None,
+        db_path: Optional[str] = None
     ) -> Dict[str, Any]:
         """Queries recent flight recorder events with optional event_type filtering."""
-        events = self.wal_ring.query_recent(limit=limit, event_type=event_type)
+        with self._resolve_ring(db_path) as ring:
+            events = ring.query_recent(limit=limit, event_type=event_type)
         return {
             "total_events": len(events),
             "filter": {"event_type": event_type, "limit": limit},
@@ -248,14 +263,26 @@ class BlackboxMCPServer:
         self,
         event_type: str,
         payload: Any,
-        source: str = "agent"
+        source: str = "agent",
+        db_path: Optional[str] = None
     ) -> Dict[str, Any]:
         """Records an arbitrary event directly into WAL ring-buffer."""
-        eid = self.wal_ring.record(event_type=event_type, payload=payload, source=source)
+        with self._resolve_ring(db_path) as ring:
+            eid = ring.record(event_type=event_type, payload=payload, source=source)
         return {"status": "recorded", "event_id": eid}
 
-    def handle_request(self, req: Dict[str, Any]) -> Dict[str, Any]:
-        method = req.get("method")
+    def handle_request(self, req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not isinstance(req, dict):
+            return {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32600, "message": "Invalid Request"}
+            }
+
+        method = req.get("method", "")
+        if "id" not in req or str(method).startswith("notifications/"):
+            return None
+
         req_id = req.get("id")
 
         if method == "initialize":
@@ -268,8 +295,9 @@ class BlackboxMCPServer:
                     "serverInfo": {"name": self.name, "version": self.version}
                 }
             }
+        elif method == "ping":
+            return {"jsonrpc": "2.0", "id": req_id, "result": {}}
         elif method == "tools/list":
-            # List distinct primary tools
             distinct = [
                 "get_crash_autopsy",
                 "generate_reproduction_test",
@@ -290,9 +318,9 @@ class BlackboxMCPServer:
             ]
             return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": tool_list}}
         elif method == "tools/call":
-            params = req.get("params", {})
+            params = req.get("params") or {}
             name = params.get("name")
-            args = params.get("arguments", {})
+            args = params.get("arguments") or {}
             if name in self.tools:
                 try:
                     res = self.tools[name]["handler"](args)
@@ -330,16 +358,43 @@ class BlackboxMCPServer:
                 continue
             try:
                 req = json.loads(line)
+            except json.JSONDecodeError as e:
+                err_resp = {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": -32700, "message": f"Parse error: {e}"}
+                }
+                print(json.dumps(err_resp), flush=True)
+                continue
+
+            try:
                 resp = self.handle_request(req)
-                print(json.dumps(resp), flush=True)
+                if resp is not None:
+                    print(json.dumps(resp), flush=True)
             except Exception as e:
                 logger.error(f"Error handling request: {e}")
 
 
-def main():
-    server = BlackboxMCPServer()
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="blackbox-mcp",
+        description="Genesis Blackbox Model Context Protocol (MCP) stdio server"
+    )
+    parser.add_argument(
+        "-v", "--version",
+        action="version",
+        version=f"genesis-blackbox {__version__}"
+    )
+    parser.add_argument(
+        "--db",
+        default=os.environ.get("BLACKBOX_DB_PATH", ".blackbox/wal.sqlite"),
+        help="Path to SQLite WAL ring-buffer database (default: .blackbox/wal.sqlite)"
+    )
+    args = parser.parse_args(argv)
+    server = BlackboxMCPServer(db_path=args.db)
     server.run_stdio()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -86,21 +86,26 @@ def _format_autopsy_for_github(raw_autopsy: str, autopsy_path: str) -> str:
     summary_blocks.append(f"# 🛩️ Genesis Blackbox: {title}\n")
     summary_blocks.append("> [!CAUTION]\n> **Automated Failure Capture Active**: Deep stack frames, local variables, and preceding events recorded.\n")
 
-    # 1. Crash Overview
     overview_lines = []
     for sec_name, sec_lines in sections.items():
         if "Crash Overview" in sec_name:
             overview_lines = [l for l in sec_lines if l.strip()]
             break
+    if not overview_lines:
+        header_meta = [
+            l for l in sections.get("header", [])
+            if l.strip() and not l.startswith("# ")
+        ]
+        if header_meta:
+            overview_lines = header_meta
 
     if overview_lines:
         summary_blocks.append("### 📋 Executive Incident Summary\n")
         summary_blocks.append("\n".join(overview_lines) + "\n")
 
-    # 2. Temporal Causal Context (Pre-Crash Events)
     events_lines = []
     for sec_name, sec_lines in sections.items():
-        if "Temporal Causal Context" in sec_name:
+        if "Temporal Causal Context" in sec_name or "Flight Recorder Timeline" in sec_name:
             events_lines = sec_lines
             break
 
@@ -110,23 +115,22 @@ def _format_autopsy_for_github(raw_autopsy: str, autopsy_path: str) -> str:
         summary_blocks.append("\n".join(events_lines).strip())
         summary_blocks.append("\n</details>\n")
 
-    # 3. Inspected Call Stack & Locals
-    stack_lines = []
+    stack_chunks: List[str] = []
     for sec_name, sec_lines in sections.items():
-        if "Inspected Call Stack" in sec_name:
-            stack_lines = sec_lines
-            break
+        if any(k in sec_name for k in ("Inspected Call Stack", "Local Variable State", "Execution Stack Trace Frames")):
+            body = "\n".join(sec_lines).strip()
+            if body:
+                stack_chunks.append(body)
 
-    if stack_lines:
+    if stack_chunks:
         summary_blocks.append("<details>")
         summary_blocks.append("<summary><b>🔍 Inspected Call Stack & Local Variable Scopes</b></summary>\n")
-        summary_blocks.append("\n".join(stack_lines).strip())
+        summary_blocks.append("\n\n".join(stack_chunks))
         summary_blocks.append("\n</details>\n")
 
-    # 4. AST Blast Radius
     blast_lines = []
     for sec_name, sec_lines in sections.items():
-        if "AST Blast Radius" in sec_name:
+        if "AST Blast Radius" in sec_name or "AST Blast-Radius" in sec_name:
             blast_lines = sec_lines
             break
 
@@ -136,7 +140,18 @@ def _format_autopsy_for_github(raw_autopsy: str, autopsy_path: str) -> str:
         summary_blocks.append("\n".join(blast_lines).strip())
         summary_blocks.append("\n</details>\n")
 
-    # 5. Suggested Fix Mandate
+    diff_lines = []
+    for sec_name, sec_lines in sections.items():
+        if "Recent Git Diff" in sec_name:
+            diff_lines = sec_lines
+            break
+
+    if diff_lines:
+        summary_blocks.append("<details>")
+        summary_blocks.append("<summary><b>🧬 Recent Git Diff in Involved Files</b></summary>\n")
+        summary_blocks.append("\n".join(diff_lines).strip())
+        summary_blocks.append("\n</details>\n")
+
     fix_lines = []
     for sec_name, sec_lines in sections.items():
         if "Suggested Fix Mandate" in sec_name:

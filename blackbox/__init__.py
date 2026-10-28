@@ -2,7 +2,7 @@
 Genesis Blackbox: Flight Recorder & AST Blast-Radius Causal Crash Compiler.
 """
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 __author__ = "Johann Schiffer / Project Genesis"
 __license__ = "MIT"
 

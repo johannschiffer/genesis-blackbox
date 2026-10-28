@@ -12,6 +12,7 @@ import sys
 import json
 import argparse
 from typing import List, Optional
+from . import __version__
 from .recorder.wal_ring import WalRingBuffer
 from .recorder.runner import run_target
 from .ast_engine.graph import CodebaseGraph
@@ -29,6 +30,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="blackbox",
         description="Genesis Blackbox: Flight Recorder & AST Blast-Radius Engine",
+    )
+    parser.add_argument(
+        "-v", "--version",
+        action="version",
+        version=f"genesis-blackbox {__version__}"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 

@@ -6,6 +6,7 @@ circular-reference protection, depth capping, and automated secret sanitization.
 
 import sys
 import types
+import threading
 import traceback
 import inspect
 from collections.abc import Mapping
@@ -129,6 +130,7 @@ class ExceptionHook:
         self.wal_ring = wal_ring
         self.serializer = serializer or SafeSerializer()
         self._original_excepthook = None
+        self._original_threading_excepthook = None
 
     def serialize_exception(
         self,
@@ -213,7 +215,7 @@ class ExceptionHook:
         return payload
 
     def install(self) -> None:
-        """Installs as the global sys.excepthook."""
+        """Installs as the global sys.excepthook and threading.excepthook."""
         self._original_excepthook = sys.excepthook
 
         def _hook(exc_type, exc_value, tb):
@@ -223,11 +225,24 @@ class ExceptionHook:
 
         sys.excepthook = _hook
 
+        if hasattr(threading, "excepthook"):
+            self._original_threading_excepthook = threading.excepthook
+
+            def _thread_hook(args):
+                self.handle_exception(args.exc_type, args.exc_value, args.exc_traceback)
+                if self._original_threading_excepthook:
+                    self._original_threading_excepthook(args)
+
+            threading.excepthook = _thread_hook
+
     def uninstall(self) -> None:
-        """Restores original sys.excepthook."""
+        """Restores original sys.excepthook and threading.excepthook."""
         if self._original_excepthook:
             sys.excepthook = self._original_excepthook
             self._original_excepthook = None
+        if self._original_threading_excepthook and hasattr(threading, "excepthook"):
+            threading.excepthook = self._original_threading_excepthook
+            self._original_threading_excepthook = None
 
 
 _active_exception_hook: Optional[ExceptionHook] = None
@@ -237,6 +252,8 @@ def install_exception_hook(wal_ring: Optional[Any] = None) -> ExceptionHook:
     """Installs global exception hook with the given or default WalRingBuffer."""
     global _active_exception_hook
     if _active_exception_hook is not None:
+        if wal_ring is not None:
+            _active_exception_hook.wal_ring = wal_ring
         return _active_exception_hook
     hook = ExceptionHook(wal_ring=wal_ring)
     hook.install()

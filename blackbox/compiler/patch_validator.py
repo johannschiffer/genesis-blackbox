@@ -82,7 +82,14 @@ class PatchValidator:
 
         touched_files = self.extract_touched_files(patch_str)
 
-        # Step 2: Apply patch
+        pre_patch_snapshots: Dict[str, Optional[bytes]] = {}
+        for fp in touched_files:
+            if os.path.isfile(fp):
+                with open(fp, "rb") as f_orig:
+                    pre_patch_snapshots[fp] = f_orig.read()
+            else:
+                pre_patch_snapshots[fp] = None
+
         apply_cmd = ["git", "apply", "-"]
         apply_res = subprocess.run(
             apply_cmd,
@@ -161,7 +168,6 @@ class PatchValidator:
                         output_messages.append(f"Regressions detected in impacted tests:\n{reg_res.stdout}\n{reg_res.stderr}")
 
         finally:
-            # Step 6: Guaranteed rollback
             reverse_cmd = ["git", "apply", "--reverse", "-"]
             rev_res = subprocess.run(
                 reverse_cmd,
@@ -171,10 +177,18 @@ class PatchValidator:
                 text=True,
                 timeout=10
             )
-            # If reverse failed, checkout touched files to clean working tree
-            if rev_res.returncode != 0 and touched_files:
-                checkout_cmd = ["git", "checkout", "--"] + touched_files
-                subprocess.run(checkout_cmd, cwd=self.repo_root, capture_output=True, text=True, timeout=10)
+            if rev_res.returncode != 0:
+                for fp, orig_bytes in pre_patch_snapshots.items():
+                    try:
+                        if orig_bytes is None:
+                            if os.path.exists(fp):
+                                os.remove(fp)
+                        else:
+                            os.makedirs(os.path.dirname(fp) or ".", exist_ok=True)
+                            with open(fp, "wb") as f_restore:
+                                f_restore.write(orig_bytes)
+                    except Exception:
+                        pass
 
         success = syntax_valid and reproducer_passed and (regressions_count == 0)
         final_output = "\n".join(output_messages) if output_messages else "Candidate patch verified cleanly: crash resolved with zero regressions."

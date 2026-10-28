@@ -2,15 +2,17 @@
 
 When diagnosing runtime errors or investigating regressions in this project, use the native Genesis Blackbox MCP tools:
 
-## Available MCP Tools:
+## Available MCP Tools
 - `get_crash_autopsy`: Compiles `.blackbox.md` deterministic autopsy from the circular SQLite WAL log.
 - `generate_reproduction_test`: Generates a standalone Python reproduction test (`test_blackbox_reproduce.py`) with reconstructed frame variables and mock patches.
-- `get_blast_radius`: Analyzes upstream and downstream dependencies for modified symbols.
+- `test_candidate_patch`: Evaluates a unified `git diff` against the reproduction test and AST-impacted tests with automatic rollback.
+- `verify_crash_resolution`: Runs the reproduction test and emits `.blackbox-resolved.md` once resolved.
+- `get_blast_radius`: Analyzes upstream callers and downstream dependencies for modified symbols.
 - `query_execution_timeline`: Inspects the sequence of HTTP requests, SQL queries, and subprocess invocations leading to the crash.
+- `record_event`: Records custom diagnostic checkpoints into the circular WAL log.
 
-## Mandatory Execution Protocol:
-1. Call `get_crash_autopsy` to examine root-cause variables and preceding execution timeline.
-2. Call `generate_reproduction_test` to generate and run the reproduction test.
-3. Validate that the reproduction script fails with the recorded crash before writing code diffs.
-4. Apply the targeted fix within the function's blast radius.
-5. Confirm the reproduction test passes cleanly before reporting completion.
+## Mandatory Execution Protocol
+1. Call `get_crash_autopsy` to inspect root-cause frame variables and preceding execution timeline.
+2. Call `generate_reproduction_test` to synthesize the standalone reproduction test and verify that it reproduces the recorded failure before editing application code.
+3. Validate candidate fixes with `test_candidate_patch` within the function's AST blast radius.
+4. Confirm resolution via `verify_crash_resolution` before reporting completion.

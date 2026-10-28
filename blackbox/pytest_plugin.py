@@ -59,10 +59,17 @@ def pytest_configure(config):
 
 
 def pytest_unconfigure(config):
-    """Restores global runtime hooks upon test session completion."""
+    """Restores global runtime hooks and closes WAL connection upon test session completion."""
     if hasattr(config, "_blackbox_wal"):
         uninstall_exception_hook()
         SubprocessInterceptor.uninstall()
+        try:
+            config._blackbox_wal.close()
+        except Exception:
+            pass
+        delattr(config, "_blackbox_wal")
+    if hasattr(config, "_blackbox_graph"):
+        delattr(config, "_blackbox_graph")
 
 
 
@@ -149,15 +156,18 @@ def pytest_runtest_makereport(item, call):
         except Exception:
             pass
 
-        # 4. Calculate AST blast radius for culprit function
         blast_summary = "N/A"
         root_cause = exc_payload.get("root_cause") or {}
         target_file = root_cause.get("filename")
         target_fn = root_cause.get("function")
-        if target_file and os.path.exists(target_file):
+        if target_file and target_fn and os.path.exists(target_file):
             try:
-                graph = CodebaseGraph()
-                blast = graph.calculate_blast_radius(target_file, symbol=target_fn)
+                graph = getattr(config, "_blackbox_graph", None)
+                if graph is None:
+                    graph = CodebaseGraph()
+                    graph.parse_directory(os.getcwd(), max_files=100)
+                    config._blackbox_graph = graph
+                blast = graph.get_blast_radius(target_function=target_fn, file_path=target_file)
                 callers = len(blast.get("upstream_callers", []))
                 callees = len(blast.get("downstream_callees", []))
                 blast_summary = f"{callers} upstream callers, {callees} downstream callees"

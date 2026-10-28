@@ -31,12 +31,7 @@ jobs:
           pip install -e ".[dev]" pytest pytest-asyncio build twine
 
       - name: Run unit tests
-        run: |
-          if [ -f "/mnt/ssd256/genesis/.venv/bin/pytest" ]; then
-            /mnt/ssd256/genesis/.venv/bin/pytest -v tests/
-          else
-            pytest -v tests/
-          fi
+        run: pytest -v tests/
 
       - name: Build package and verify distribution
         run: |

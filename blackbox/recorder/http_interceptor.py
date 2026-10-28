@@ -120,11 +120,11 @@ class BlackboxASGIMiddleware:
             await self.app(scope, receive, send)
             return
 
-        trace_id = scope.get("headers", {})
         method = scope.get("method", "GET")
         path = scope.get("path", "/")
         query_string = scope.get("query_string", b"").decode("latin1")
         headers = sanitize_headers(scope.get("headers", []))
+        trace_id = headers.get("x-trace-id") or headers.get("x-request-id")
 
         start_time = time.perf_counter()
         request_body_chunks = []
@@ -184,9 +184,73 @@ class BlackboxASGIMiddleware:
                 event_type="http_transaction",
                 source="asgi",
                 duration_ms=round(duration_ms, 3),
+                trace_id=trace_id,
                 status=status,
                 payload=payload
             )
+
+
+class _ReplayingWSGIInput:
+    """Preserves prefetched WSGI request bytes ahead of a non-seekable input stream."""
+
+    def __init__(self, prefix: bytes, stream: Any):
+        self._buf = bytearray(prefix)
+        self._stream = stream
+
+    def read(self, size: int = -1) -> bytes:
+        if size is None or size < 0:
+            head = bytes(self._buf)
+            self._buf.clear()
+            tail = self._stream.read() if self._stream else b""
+            return head + tail
+        if size <= len(self._buf):
+            out = bytes(self._buf[:size])
+            del self._buf[:size]
+            return out
+        head = bytes(self._buf)
+        self._buf.clear()
+        rem = size - len(head)
+        tail = self._stream.read(rem) if self._stream else b""
+        return head + tail
+
+    def readline(self, size: int = -1) -> bytes:
+        nl = self._buf.find(b"\n")
+        if nl != -1:
+            end = nl + 1 if (size is None or size < 0) else min(nl + 1, size)
+            out = bytes(self._buf[:end])
+            del self._buf[:end]
+            return out
+        if size is not None and size >= 0 and len(self._buf) >= size:
+            out = bytes(self._buf[:size])
+            del self._buf[:size]
+            return out
+        head = bytes(self._buf)
+        self._buf.clear()
+        if not self._stream:
+            return head
+        rem_size = -1 if (size is None or size < 0) else (size - len(head))
+        tail = self._stream.readline(rem_size) if rem_size >= 0 else self._stream.readline()
+        return head + tail
+
+    def readlines(self, hint: int = -1) -> List[bytes]:
+        lines: List[bytes] = []
+        total = 0
+        while True:
+            line = self.readline()
+            if not line:
+                break
+            lines.append(line)
+            total += len(line)
+            if hint is not None and hint > 0 and total >= hint:
+                break
+        return lines
+
+    def __iter__(self):
+        while True:
+            line = self.readline()
+            if not line:
+                break
+            yield line
 
 
 class BlackboxWSGIMiddleware:
@@ -220,19 +284,17 @@ class BlackboxWSGIMiddleware:
                 raw_headers.append((k.replace("_", "-").lower(), v))
 
         headers = sanitize_headers(raw_headers)
+        trace_id = headers.get("x-trace-id") or headers.get("x-request-id")
 
-        # Intercept request body safely
         req_body = None
         content_length = environ.get("CONTENT_LENGTH")
-        if content_length and content_length.isdigit():
+        if content_length and str(content_length).isdigit() and int(content_length) > 0:
             length = min(int(content_length), self.max_body_bytes)
             input_stream = environ.get("wsgi.input")
             if input_stream:
                 try:
                     req_body = input_stream.read(length)
-                    # Reset or wrap input stream if readable
-                    if hasattr(input_stream, "seek"):
-                        input_stream.seek(0)
+                    environ["wsgi.input"] = _ReplayingWSGIInput(req_body, input_stream)
                 except Exception:
                     pass
 
@@ -250,10 +312,15 @@ class BlackboxWSGIMiddleware:
         status = "ok"
         error_msg = None
         resp_chunks = []
+        captured_resp_bytes = 0
+        result = None
         try:
             result = self.app(environ, intercepted_start_response)
             for chunk in result:
-                resp_chunks.append(chunk)
+                if isinstance(chunk, bytes) and captured_resp_bytes < self.max_body_bytes:
+                    take = chunk[: self.max_body_bytes - captured_resp_bytes]
+                    resp_chunks.append(take)
+                    captured_resp_bytes += len(take)
                 yield chunk
         except Exception as exc:
             status = "error"
@@ -261,8 +328,13 @@ class BlackboxWSGIMiddleware:
             status_code[0] = 500
             raise
         finally:
+            if result is not None and hasattr(result, "close"):
+                try:
+                    result.close()
+                except Exception:
+                    pass
             duration_ms = (time.perf_counter() - start_time) * 1000.0
-            res_body_raw = b"".join(c for c in resp_chunks if isinstance(c, bytes))
+            res_body_raw = b"".join(resp_chunks)
 
             payload = {
                 "method": method,
@@ -284,6 +356,7 @@ class BlackboxWSGIMiddleware:
                 event_type="http_transaction",
                 source="wsgi",
                 duration_ms=round(duration_ms, 3),
+                trace_id=trace_id,
                 status=status,
                 payload=payload
             )

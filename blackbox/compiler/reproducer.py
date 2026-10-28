@@ -76,11 +76,15 @@ class CrashReproducer:
             if not k.startswith("__") and not k.startswith("@"):
                 clean_locals[k] = v
 
+        safe_doc_msg = str(exc_msg).replace("\\", "\\\\").replace('"""', "'''").replace("\n", " ")
+        safe_doc_file = str(culprit_file).replace("\\", "/")
+        abs_target = os.path.abspath(culprit_file) if culprit_file else ""
+
         lines = [
             '"""',
             'Genesis Blackbox: Deterministic Crash Reproduction Test',
-            f'Target Exception: {exc_type}: {exc_msg}',
-            f'Target Culprit: {culprit_func}() in {culprit_file}:{culprit_line}',
+            f'Target Exception: {exc_type}: {safe_doc_msg}',
+            f'Target Culprit: {culprit_func}() in {safe_doc_file}:{culprit_line}',
             'Generated automatically by Genesis Blackbox Causal Crash Reproducer.',
             '"""',
             "",
@@ -90,9 +94,9 @@ class CrashReproducer:
             "from unittest.mock import patch, MagicMock",
             "import pytest",
             "",
-            f'TARGET_FILE = r"{os.path.abspath(culprit_file) if culprit_file else ""}"',
-            f'TARGET_FUNCTION_NAME = "{culprit_func}"',
-            f'EXPECTED_EXCEPTION = "{exc_type}"',
+            f'TARGET_FILE = {repr(abs_target)}',
+            f'TARGET_FUNCTION_NAME = {repr(culprit_func)}',
+            f'EXPECTED_EXCEPTION = {repr(exc_type)}',
             "",
             "",
             "def _load_target_function():",
@@ -100,6 +104,9 @@ class CrashReproducer:
             '    if not TARGET_FILE or not os.path.isfile(TARGET_FILE):',
             '        pytest.skip(f"Source file {TARGET_FILE} not found on disk.")',
             '    ',
+            '    target_dir = os.path.dirname(os.path.abspath(TARGET_FILE))',
+            '    if target_dir and target_dir not in sys.path:',
+            '        sys.path.insert(0, target_dir)',
             '    module_name = "blackbox_reproduced_target"',
             '    spec = importlib.util.spec_from_file_location(module_name, TARGET_FILE)',
             '    if spec is None or spec.loader is None:',
@@ -116,7 +123,7 @@ class CrashReproducer:
             "",
             "def test_reproduce_and_verify_fix():",
             '    """',
-            f'    Reproduces crash scenario: {exc_type}: {exc_msg}.',
+            f'    Reproduces crash scenario: {exc_type}: {safe_doc_msg}.',
             '    - In UNFIXED code: Fails with the recorded exception.',
             '    - In FIXED code: Completes execution successfully.',
             '    """',
