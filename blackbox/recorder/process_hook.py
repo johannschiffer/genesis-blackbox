@@ -320,3 +320,6 @@ class SubprocessInterceptor:
 
         cls._installed = False
         cls._global_instance = None
+
+    uninstall_global = uninstall
+

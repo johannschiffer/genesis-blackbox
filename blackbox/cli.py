@@ -80,6 +80,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     ver_parser.add_argument("--receipt", default=".blackbox-resolved.md", help="Path to resolution receipt markdown file (default: .blackbox-resolved.md)")
     ver_parser.add_argument("--db", default=".blackbox/wal.sqlite", help="Path to WAL database")
 
+    # Subcommand: ci-summary
+    ci_parser = subparsers.add_parser("ci-summary", help="Export failure autopsy as GitHub Actions Step Summary")
+    ci_parser.add_argument("--autopsy", default=".blackbox.md", help="Path to autopsy capsule file (default: .blackbox.md)")
+    ci_parser.add_argument("--output", help="Output summary file path (default: $GITHUB_STEP_SUMMARY or stdout)")
+
     args = parser.parse_args(argv)
 
     if args.command == "record":
@@ -224,6 +229,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             if result.get("output"):
                 print(result.get("output"), file=sys.stderr)
             return 1
+
+    elif args.command == "ci-summary":
+        from .ci.github_summary import export_github_step_summary
+        summary_md = export_github_step_summary(autopsy_path=args.autopsy, summary_file=args.output)
+        if not args.output and not os.environ.get("GITHUB_STEP_SUMMARY"):
+            print(summary_md)
+        return 0
 
     return 0
 

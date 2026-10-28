@@ -27,7 +27,7 @@ class BlackboxMCPServer:
         self.ast_graph = CodebaseGraph()
         self.compiler = CausalCrashCompiler(self.wal_ring, self.ast_graph)
         self.name = "genesis-blackbox"
-        self.version = "0.1.2"
+        self.version = "0.1.3"
         self._init_tools()
 
     def _init_tools(self):
