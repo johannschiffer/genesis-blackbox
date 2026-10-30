@@ -25,6 +25,14 @@ class PatchValidator:
         self.db_path = db_path
         self.impact_selector = ImpactTestSelector(root_dir=self.repo_root)
 
+    def is_path_safe(self, path: str) -> bool:
+        """Verifies if path resolves safely within repo_root without directory traversal."""
+        try:
+            rel = os.path.relpath(os.path.abspath(path), self.repo_root)
+            return not (rel.startswith("..") or os.path.isabs(rel))
+        except Exception:
+            return False
+
     def extract_touched_files(self, patch_str: str) -> List[str]:
         """Extracts modified file paths from a unified diff string."""
         touched: Set[str] = set()
@@ -48,6 +56,14 @@ class PatchValidator:
         """
         if not patch_str.strip():
             return False
+        if not patch_str.endswith("\n"):
+            patch_str += "\n"
+
+        touched = self.extract_touched_files(patch_str)
+        for fp in touched:
+            if not self.is_path_safe(fp):
+                return False
+
         try:
             cmd = ["git", "apply", "--check", "-"]
             res = subprocess.run(
@@ -71,6 +87,20 @@ class PatchValidator:
         Applies candidate patch temporarily, verifies reproduction test and regression impact,
         guarantees full rollback, and returns a structured verdict.
         """
+        if not patch_str.endswith("\n"):
+            patch_str += "\n"
+
+        touched_files = self.extract_touched_files(patch_str)
+        for fp in touched_files:
+            if not self.is_path_safe(fp):
+                return {
+                    "success": False,
+                    "syntax_valid": False,
+                    "reproducer_passed": False,
+                    "regressions_count": 0,
+                    "output": f"Security violation: path traversal detected outside repository: {fp}"
+                }
+
         # Step 1: Dry run verification
         if not self.validate_patch_dry_run(patch_str):
             return {
@@ -80,8 +110,6 @@ class PatchValidator:
                 "regressions_count": 0,
                 "output": "Candidate patch failed 'git apply --check'. Invalid diff format or conflict with working tree."
             }
-
-        touched_files = self.extract_touched_files(patch_str)
 
         pre_patch_snapshots: Dict[str, Optional[bytes]] = {}
         for fp in touched_files:

@@ -31,19 +31,26 @@ const SENSITIVE_KEYS = new Set([
   'key', 'secret', 'password', 'private', 'credential', 'access_token'
 ]);
 
+function isSensitiveKey(key) {
+  const lk = String(key || '').toLowerCase();
+  if (SENSITIVE_KEYS.has(lk)) return true;
+  for (const k of SENSITIVE_KEYS) {
+    if (lk.includes(k)) return true;
+  }
+  return false;
+}
+
 function sanitizeHeaders(headers) {
   if (!headers) return {};
   const out = {};
   try {
     if (typeof headers.forEach === 'function') {
       headers.forEach((val, key) => {
-        const lk = String(key).toLowerCase();
-        out[key] = SENSITIVE_KEYS.has(lk) ? '******** [REDACTED]' : String(val);
+        out[key] = isSensitiveKey(key) ? '******** [REDACTED]' : String(val);
       });
     } else if (typeof headers === 'object') {
       for (const [key, val] of Object.entries(headers)) {
-        const lk = String(key).toLowerCase();
-        out[key] = SENSITIVE_KEYS.has(lk) ? '******** [REDACTED]' : String(val);
+        out[key] = isSensitiveKey(key) ? '******** [REDACTED]' : String(val);
       }
     }
   } catch (_) {}
@@ -53,10 +60,11 @@ function sanitizeHeaders(headers) {
 function sanitizeUrl(rawUrl) {
   if (!rawUrl) return '';
   try {
-    const isFull = rawUrl.startsWith('http://') || rawUrl.startsWith('https://');
-    const u = new URL(rawUrl, 'http://localhost');
+    const strUrl = String(rawUrl);
+    const isFull = strUrl.startsWith('http://') || strUrl.startsWith('https://');
+    const u = new URL(strUrl, 'http://localhost');
     for (const k of Array.from(u.searchParams.keys())) {
-      if (SENSITIVE_KEYS.has(k.toLowerCase())) {
+      if (isSensitiveKey(k)) {
         u.searchParams.set(k, 'REDACTED');
       }
     }
@@ -241,14 +249,22 @@ function recordException(err, contextType) {
   });
 }
 
+function normalizeError(err) {
+  if (err instanceof Error) return err;
+  const msg = err === null ? 'null' : (err === undefined ? 'undefined' : (typeof err === 'object' ? JSON.stringify(err) : String(err)));
+  const normalized = new Error(msg);
+  normalized.name = (err && err.constructor && err.constructor.name && err.constructor.name !== 'Object') ? err.constructor.name : 'Error';
+  return normalized;
+}
+
 process.on('uncaughtException', (err) => {
-  recordException(err, 'uncaughtException');
+  recordException(normalizeError(err), 'uncaughtException');
   console.error(err);
   process.exit(1);
 });
 
 process.on('unhandledRejection', (reason) => {
-  recordException(reason instanceof Error ? reason : new Error(String(reason)), 'unhandledRejection');
+  recordException(normalizeError(reason), 'unhandledRejection');
   console.error('UnhandledPromiseRejection:', reason);
   process.exit(1);
 });
@@ -288,6 +304,10 @@ def ingest_node_spool(spool_path: str, wal_ring: WalRingBuffer) -> int:
                     count += 1
                 except Exception:
                     pass
+        try:
+            os.remove(spool_path)
+        except Exception:
+            pass
     except Exception:
         pass
     return count

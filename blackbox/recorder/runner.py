@@ -109,7 +109,7 @@ def run_target(cmd_args, db_path: str = ".blackbox/wal.sqlite") -> int:
         env["BLACKBOX_NODE_SPOOL"] = spool_path
 
         existing_node_opts = env.get("NODE_OPTIONS", "")
-        req_opt = f"--require {preload_path}"
+        req_opt = f'--require "{preload_path}"'
         env["NODE_OPTIONS"] = f"{req_opt} {existing_node_opts}".strip()
 
         start_eid = ring.record(event_type="SUBPROCESS_START", payload={"command": cmd_args}, source="blackbox_runner")
@@ -174,5 +174,10 @@ def run_target(cmd_args, db_path: str = ".blackbox/wal.sqlite") -> int:
             print(f"[Genesis-Blackbox] Execution failed: {e}", file=sys.stderr)
             return 1
     finally:
+        try:
+            from .node_preload import ingest_node_spool
+            ingest_node_spool(spool_path, ring)
+        except Exception:
+            pass
         ring.close()
         shutil.rmtree(bootstrap_dir, ignore_errors=True)

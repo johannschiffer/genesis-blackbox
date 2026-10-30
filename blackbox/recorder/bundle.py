@@ -235,6 +235,14 @@ class CrashBundler:
                     }
 
                 checksums = manifest.get("checksums", {})
+                if not isinstance(checksums, dict):
+                    return {
+                        "valid": False,
+                        "error": "Manifest 'checksums' field is not a valid dictionary",
+                        "manifest": manifest,
+                        "corrupted_files": [],
+                        "files": namelist
+                    }
                 corrupted: List[Dict[str, str]] = []
 
                 for member_name, expected_sha in checksums.items():
@@ -245,7 +253,15 @@ class CrashBundler:
                         })
                         continue
 
-                    data = zf.read(member_name)
+                    try:
+                        data = zf.read(member_name)
+                    except Exception as re:
+                        corrupted.append({
+                            "file": member_name,
+                            "error": f"Failed to decompress archive member: {re}"
+                        })
+                        continue
+
                     actual_sha = hashlib.sha256(data).hexdigest()
                     if actual_sha != expected_sha:
                         corrupted.append({

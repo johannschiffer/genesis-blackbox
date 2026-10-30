@@ -7,6 +7,7 @@ to pinpoint the exact divergence in HTTP requests, SQL queries, and variable sta
 import os
 import json
 import time
+import math
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple, Set
 from ..recorder.wal_ring import WalRingBuffer
@@ -381,7 +382,9 @@ class StateDiffer:
         if event_type in ("SQL_QUERY", "SQL_EXEC", "sql_query"):
             b_sql = str(b_payload.get("query", b_payload.get("sql", ""))).strip()
             f_sql = str(f_payload.get("query", f_payload.get("sql", ""))).strip()
-            if b_sql != f_sql:
+            b_norm = " ".join(b_sql.split())
+            f_norm = " ".join(f_sql.split())
+            if b_norm != f_norm:
                 return f"SQL query structure changed: '{b_sql[:35]}' vs '{f_sql[:35]}'"
 
             b_params = b_payload.get("params")
@@ -413,8 +416,25 @@ class StateDiffer:
 
         return None
 
-    def _diff_param_shapes(self, b_params: Any, f_params: Any) -> Optional[str]:
-        """Detects parameter type mutation such as value mutating to None."""
+    def _is_nan(self, val: Any) -> bool:
+        """Checks if a value is float NaN."""
+        return isinstance(val, float) and math.isnan(val)
+
+    def _diff_param_shapes(self, b_params: Any, f_params: Any, depth: int = 0, max_depth: int = 5) -> Optional[str]:
+        """Detects parameter type mutation such as value mutating to None, NaN, or nested schema shift."""
+        if depth > max_depth:
+            return None
+
+        # NaN transitions
+        b_nan = self._is_nan(b_params)
+        f_nan = self._is_nan(f_params)
+        if b_nan and not f_nan:
+            return f"Param mutated from NaN to {type(f_params).__name__}"
+        if not b_nan and f_nan:
+            return f"Param ({type(b_params).__name__}) mutated to NaN"
+        if b_nan and f_nan:
+            return None
+
         if type(b_params) is not type(f_params) and (b_params is not None and f_params is not None):
             return f"Type mismatch: {type(b_params).__name__} vs {type(f_params).__name__}"
 
@@ -422,6 +442,15 @@ class StateDiffer:
             if len(b_params) != len(f_params):
                 return f"Parameter length changed: {len(b_params)} vs {len(f_params)}"
             for i, (bp, fp) in enumerate(zip(b_params, f_params)):
+                bp_nan = self._is_nan(bp)
+                fp_nan = self._is_nan(fp)
+                if bp_nan and not fp_nan:
+                    return f"Param #{i} mutated from NaN to {type(fp).__name__}"
+                if not bp_nan and fp_nan:
+                    return f"Param #{i} ({type(bp).__name__}) mutated to NaN"
+                if bp_nan and fp_nan:
+                    continue
+
                 if bp is not None and fp is None:
                     return f"Param #{i} ({type(bp).__name__}) mutated to None"
                 if bp is None and fp is not None:
@@ -429,15 +458,36 @@ class StateDiffer:
                 if type(bp) is not type(fp) and bp is not None and fp is not None:
                     return f"Param #{i} mutated from {type(bp).__name__} to {type(fp).__name__}"
 
+                if isinstance(bp, (dict, list, tuple)) and isinstance(fp, (dict, list, tuple)):
+                    nested = self._diff_param_shapes(bp, fp, depth + 1, max_depth)
+                    if nested:
+                        return f"Param #{i} -> {nested}"
+
         elif isinstance(b_params, dict) and isinstance(f_params, dict):
             for k, bv in b_params.items():
                 if k not in f_params:
                     return f"Named param '{k}' missing in crashing run"
                 fv = f_params[k]
+                bv_nan = self._is_nan(bv)
+                fv_nan = self._is_nan(fv)
+                if bv_nan and not fv_nan:
+                    return f"Named param '{k}' mutated from NaN to {type(fv).__name__}"
+                if not bv_nan and fv_nan:
+                    return f"Named param '{k}' ({type(bv).__name__}) mutated to NaN"
+                if bv_nan and fv_nan:
+                    continue
+
                 if bv is not None and fv is None:
                     return f"Named param '{k}' mutated to None"
+                if bv is None and fv is not None:
+                    return f"Named param '{k}' mutated from None to {type(fv).__name__}"
                 if type(bv) is not type(fv) and bv is not None and fv is not None:
                     return f"Named param '{k}' mutated from {type(bv).__name__} to {type(fv).__name__}"
+
+                if isinstance(bv, (dict, list, tuple)) and isinstance(fv, (dict, list, tuple)):
+                    nested = self._diff_param_shapes(bv, fv, depth + 1, max_depth)
+                    if nested:
+                        return f"Named param '{k}' -> {nested}"
 
         return None
 
@@ -587,8 +637,15 @@ class StateDiffer:
         f_run = diff_result["failing_run"]
         div = diff_result.get("divergence_point")
 
-        b_ts = datetime.fromtimestamp(b_run["timestamp"], tz=timezone.utc).isoformat() if b_run["timestamp"] else "N/A"
-        f_ts = datetime.fromtimestamp(f_run["timestamp"], tz=timezone.utc).isoformat() if f_run["timestamp"] else "N/A"
+        try:
+            b_ts = datetime.fromtimestamp(float(b_run["timestamp"]), tz=timezone.utc).isoformat() if b_run.get("timestamp") else "N/A"
+        except (ValueError, TypeError, OSError):
+            b_ts = str(b_run.get("timestamp") or "N/A")
+
+        try:
+            f_ts = datetime.fromtimestamp(float(f_run["timestamp"]), tz=timezone.utc).isoformat() if f_run.get("timestamp") else "N/A"
+        except (ValueError, TypeError, OSError):
+            f_ts = str(f_run.get("timestamp") or "N/A")
 
         md = []
         md.append("# ⏱️ BLACKBOX TIME-TRAVEL EXECUTION DIFF")

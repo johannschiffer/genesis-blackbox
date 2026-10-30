@@ -98,6 +98,15 @@ class CrashReproducer:
         safe_doc_msg = str(exc_msg).replace("*/", "* /").replace("\n", " ")
         safe_target_path = abs_target.replace("\\", "/")
 
+        if culprit_func in ("<anonymous>", "<module>", "anonymous", "", "None"):
+            for frame in payload.get("frames", []):
+                fn_name = frame.get("function")
+                if fn_name and fn_name not in ("<anonymous>", "<module>", "anonymous", "None"):
+                    culprit_func = fn_name
+                    if frame.get("filename"):
+                        safe_target_path = os.path.abspath(frame["filename"]).replace("\\", "/")
+                    break
+
         clean_locals = {}
         for k, v in locals_dict.items():
             if not str(k).startswith("_"):
@@ -139,12 +148,20 @@ class CrashReproducer:
             "  }",
             "  const fileUrl = pathToFileURL(TARGET_FILE).href;",
             "  const mod = await import(fileUrl);",
-            "  let fn = mod[TARGET_FUNCTION_NAME];",
+            "  let fn = (TARGET_FUNCTION_NAME && !TARGET_FUNCTION_NAME.startsWith('<')) ? mod[TARGET_FUNCTION_NAME] : null;",
             "  if (!fn && mod.default) {",
-            "    fn = typeof mod.default === 'object' ? mod.default[TARGET_FUNCTION_NAME] : mod.default;",
+            "    fn = (typeof mod.default === 'object' && TARGET_FUNCTION_NAME && !TARGET_FUNCTION_NAME.startsWith('<')) ? mod.default[TARGET_FUNCTION_NAME] : mod.default;",
             "  }",
             "  if (!fn && typeof mod === 'function') {",
             "    fn = mod;",
+            "  }",
+            "  if (!fn && typeof mod === 'object' && mod !== null) {",
+            "    for (const [k, v] of Object.entries(mod)) {",
+            "      if (typeof v === 'function') {",
+            "        fn = v;",
+            "        break;",
+            "      }",
+            "    }",
             "  }",
             "  assert.ok(fn, `Target function ${TARGET_FUNCTION_NAME} not found in ${TARGET_FILE}`);",
             "  return fn;",

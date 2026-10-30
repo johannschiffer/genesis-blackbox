@@ -35,9 +35,9 @@ class PolyglotParser:
 
     def parse(self, code_str: str) -> Dict[str, Any]:
         """Parses JavaScript/TypeScript source code."""
-        cleaned_code, line_offsets = self._strip_comments_and_strings(code_str)
-        self._extract_imports(code_str, cleaned_code)
-        self._extract_exports(code_str, cleaned_code)
+        cleaned_code, code_no_comments, line_offsets = self._strip_comments_and_strings(code_str)
+        self._extract_imports(code_no_comments, cleaned_code)
+        self._extract_exports(code_no_comments, cleaned_code)
         self._extract_functions_and_components(code_str, cleaned_code, line_offsets)
         return {
             "filename": self.file_path,
@@ -55,7 +55,7 @@ class PolyglotParser:
         Verifies balanced brackets, parentheses, braces, and closed string/template literals.
         Raises SyntaxError if structural syntax is invalid.
         """
-        cleaned, line_offsets = self._strip_comments_and_strings(code_str)
+        cleaned, _, line_offsets = self._strip_comments_and_strings(code_str)
         # Check bracket/brace/parenthesis nesting
         stack: List[Tuple[str, int]] = []
         matching = {")": "(", "}": "{", "]": "["}
@@ -77,26 +77,28 @@ class PolyglotParser:
         # Parse symbols and structure
         self.parse(code_str)
 
-    def _strip_comments_and_strings(self, code: str) -> Tuple[str, List[int]]:
+    def _strip_comments_and_strings(self, code: str) -> Tuple[str, str, List[int]]:
         """
         Replaces comment characters and string contents with whitespace,
         preserving newlines and exact character offsets.
-        Returns (cleaned_code, line_start_offsets).
+        Properly parses template literals and nested ${...} expressions.
+        Returns (cleaned_code, code_without_comments, line_start_offsets).
         """
-        chars = list(code)
-        n = len(chars)
+        chars_clean = list(code)
+        chars_nocomm = list(code)
+        n = len(code)
         i = 0
+        line_offsets = [0]
+
+        template_stack: List[int] = []  # 0 = template literal text; >0 = brace count inside ${...}
         in_single_quote = False
         in_double_quote = False
-        in_template_literal = False
         in_line_comment = False
         in_block_comment = False
 
-        line_offsets = [0]
-
         while i < n:
-            c = chars[i]
-            next_c = chars[i + 1] if i + 1 < n else ""
+            c = code[i]
+            next_c = code[i + 1] if i + 1 < n else ""
 
             if c == "\n":
                 line_offsets.append(i + 1)
@@ -106,89 +108,113 @@ class PolyglotParser:
                 continue
 
             if in_line_comment:
-                chars[i] = " "
+                chars_clean[i] = " "
+                chars_nocomm[i] = " "
                 i += 1
                 continue
 
             if in_block_comment:
                 if c == "*" and next_c == "/":
-                    chars[i] = " "
-                    chars[i + 1] = " "
+                    chars_clean[i] = " "
+                    chars_clean[i + 1] = " "
+                    chars_nocomm[i] = " "
+                    chars_nocomm[i + 1] = " "
                     in_block_comment = False
                     i += 2
                 else:
-                    chars[i] = " "
+                    chars_clean[i] = " "
+                    chars_nocomm[i] = " "
                     i += 1
                 continue
 
             if in_single_quote:
                 if c == "\\" and i + 1 < n:
-                    chars[i] = " "
-                    chars[i + 1] = " "
+                    chars_clean[i] = " "
+                    chars_clean[i + 1] = " "
                     i += 2
                 elif c == "'":
-                    chars[i] = " "
+                    chars_clean[i] = " "
                     in_single_quote = False
                     i += 1
                 else:
-                    chars[i] = " "
+                    chars_clean[i] = " "
                     i += 1
                 continue
 
             if in_double_quote:
                 if c == "\\" and i + 1 < n:
-                    chars[i] = " "
-                    chars[i + 1] = " "
+                    chars_clean[i] = " "
+                    chars_clean[i + 1] = " "
                     i += 2
                 elif c == '"':
-                    chars[i] = " "
+                    chars_clean[i] = " "
                     in_double_quote = False
                     i += 1
                 else:
-                    chars[i] = " "
+                    chars_clean[i] = " "
                     i += 1
                 continue
 
-            if in_template_literal:
+            # Template literal text mode (not inside ${...} interpolation)
+            in_template_text = len(template_stack) > 0 and template_stack[-1] == 0
+
+            if in_template_text:
                 if c == "\\" and i + 1 < n:
-                    chars[i] = " "
-                    chars[i + 1] = " "
+                    chars_clean[i] = " "
+                    chars_clean[i + 1] = " "
                     i += 2
                 elif c == "`":
-                    chars[i] = " "
-                    in_template_literal = False
+                    chars_clean[i] = " "
+                    template_stack.pop()
                     i += 1
                 elif c == "$" and next_c == "{":
-                    chars[i] = "$"
-                    chars[i + 1] = "{"
+                    chars_clean[i] = "$"
+                    chars_clean[i + 1] = "{"
+                    template_stack[-1] = 1  # inside ${...} with brace depth 1
                     i += 2
                 else:
-                    chars[i] = " "
+                    chars_clean[i] = " "
                     i += 1
                 continue
 
-            # Start comments or strings
+            # In code mode: either top-level or inside ${...} interpolation
+            if len(template_stack) > 0 and template_stack[-1] > 0:
+                if c == "{":
+                    template_stack[-1] += 1
+                elif c == "}":
+                    template_stack[-1] -= 1
+                    if template_stack[-1] == 0:
+                        # Exiting ${...} interpolation back to template text mode
+                        chars_clean[i] = "}"
+                        i += 1
+                        continue
+
+            # Start of comments or strings in code mode
             if c == "/" and next_c == "/":
-                chars[i] = " "
-                chars[i + 1] = " "
+                chars_clean[i] = " "
+                chars_clean[i + 1] = " "
+                chars_nocomm[i] = " "
+                chars_nocomm[i + 1] = " "
                 in_line_comment = True
                 i += 2
             elif c == "/" and next_c == "*":
-                chars[i] = " "
-                chars[i + 1] = " "
+                chars_clean[i] = " "
+                chars_clean[i + 1] = " "
+                chars_nocomm[i] = " "
+                chars_nocomm[i + 1] = " "
                 in_block_comment = True
                 i += 2
             elif c == "'":
-                chars[i] = " "
+                chars_clean[i] = " "
                 in_single_quote = True
                 i += 1
             elif c == '"':
-                chars[i] = " "
+                chars_clean[i] = " "
                 in_double_quote = True
                 i += 1
             elif c == "`":
-                chars[i] = " "
-                in_template_literal = True
+                chars_clean[i] = " "
+                template_stack.append(0)
                 i += 1
             else:
                 i += 1
@@ -197,12 +223,12 @@ class PolyglotParser:
             raise SyntaxError("Unclosed single-quote string literal")
         if in_double_quote:
             raise SyntaxError("Unclosed double-quote string literal")
-        if in_template_literal:
-            raise SyntaxError("Unclosed template literal")
         if in_block_comment:
             raise SyntaxError("Unclosed block comment")
+        if template_stack:
+            raise SyntaxError("Unclosed template literal")
 
-        return "".join(chars), line_offsets
+        return "".join(chars_clean), "".join(chars_nocomm), line_offsets
 
     def _offset_to_lineno(self, offset: int, line_offsets: List[int]) -> int:
         """Converts character offset to 1-based line number."""
@@ -210,14 +236,16 @@ class PolyglotParser:
         idx = bisect.bisect_right(line_offsets, offset)
         return idx
 
-    def _extract_imports(self, raw_code: str, cleaned_code: str) -> None:
-        """Extracts ES6 and CommonJS import declarations."""
+    def _extract_imports(self, code_no_comments: str, cleaned_code: str) -> None:
+        """Extracts ES6 and CommonJS import declarations, ignoring comments and strings."""
         # 1. ES6 static imports: import ... from '...'
         es6_pattern = re.compile(
             r'import\s+(?:type\s+)?(?:([a-zA-Z0-9_$]+)\s*,?\s*)?(?:(\*\s+as\s+[a-zA-Z0-9_$]+)|(?:\{\s*([^}]+)\s*\}))?\s*from\s*[\'"]([^\'"]+)[\'"]',
             re.MULTILINE
         )
-        for m in es6_pattern.finditer(raw_code):
+        for m in es6_pattern.finditer(code_no_comments):
+            if not cleaned_code[m.start():m.start() + 6].startswith("import"):
+                continue
             default_import = m.group(1)
             ns_import = m.group(2)
             named_imports = m.group(3)
@@ -258,7 +286,9 @@ class PolyglotParser:
 
         # 2. Side-effect imports: import '...'
         side_effect_pattern = re.compile(r'import\s+[\'"]([^\'"]+)[\'"]', re.MULTILINE)
-        for m in side_effect_pattern.finditer(raw_code):
+        for m in side_effect_pattern.finditer(code_no_comments):
+            if not cleaned_code[m.start():m.start() + 6].startswith("import"):
+                continue
             mod = m.group(1)
             self.imported_modules.add(mod)
 
@@ -267,7 +297,10 @@ class PolyglotParser:
             r'(?:const|let|var)\s+(?:([a-zA-Z0-9_$]+)|\{\s*([^}]+)\s*\})\s*=\s*require\(\s*[\'"]([^\'"]+)[\'"]\s*\)',
             re.MULTILINE
         )
-        for m in cjs_pattern.finditer(raw_code):
+        for m in cjs_pattern.finditer(code_no_comments):
+            prefix = cleaned_code[m.start():m.start() + 5]
+            if not any(prefix.startswith(kw) for kw in ("const", "let", "var")):
+                continue
             default_sym = m.group(1)
             named_syms = m.group(2)
             mod_source = m.group(3)
@@ -297,11 +330,13 @@ class PolyglotParser:
                 "is_relative": mod_source.startswith(".")
             })
 
-    def _extract_exports(self, raw_code: str, cleaned_code: str) -> None:
-        """Extracts exported symbol names."""
+    def _extract_exports(self, code_no_comments: str, cleaned_code: str) -> None:
+        """Extracts exported symbol names, ignoring comments and strings."""
         # export default function/class/variable
         exp_def = re.compile(r'export\s+default\s+(?:(?:async\s+)?function\s*\*?\s*([a-zA-Z0-9_$]+)|class\s+([a-zA-Z0-9_$]+)|([a-zA-Z0-9_$]+))')
-        for m in exp_def.finditer(raw_code):
+        for m in exp_def.finditer(code_no_comments):
+            if not cleaned_code[m.start():m.start() + 6].startswith("export"):
+                continue
             name = m.group(1) or m.group(2) or m.group(3)
             if name and name not in ("function", "class"):
                 self.exports.append({"name": name, "is_default": True})
@@ -309,14 +344,18 @@ class PolyglotParser:
 
         # export function/class/const/let
         exp_named = re.compile(r'export\s+(?:async\s+)?(?:function\s*\*?|class|(?:const|let|var))\s+([a-zA-Z0-9_$]+)')
-        for m in exp_named.finditer(raw_code):
+        for m in exp_named.finditer(code_no_comments):
+            if not cleaned_code[m.start():m.start() + 6].startswith("export"):
+                continue
             name = m.group(1)
             self.exports.append({"name": name, "is_default": False})
             self.defined_symbols.add(name)
 
         # export { a, b as c }
         exp_list = re.compile(r'export\s*\{\s*([^}]+)\s*\}')
-        for m in exp_list.finditer(raw_code):
+        for m in exp_list.finditer(code_no_comments):
+            if not cleaned_code[m.start():m.start() + 6].startswith("export"):
+                continue
             for item in m.group(1).split(","):
                 item = item.strip()
                 if not item:
@@ -338,16 +377,16 @@ class PolyglotParser:
         """Extracts function, method, and React/Next.js component declarations."""
         n = len(cleaned_code)
 
-        # Regex patterns for function headers
-        # 1. Standard function: function foo(a, b) {
+        # Regex patterns for function headers with support for generics
+        # 1. Standard function: function foo<T>(a, b) {
         fn_decl_regex = re.compile(
-            r'(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([a-zA-Z0-9_$]+)?\s*\(([^)]*)\)',
+            r'(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([a-zA-Z0-9_$]+)?(?:\s*<[^()]+>)?\s*\(([^)]*)\)',
             re.MULTILINE
         )
 
-        # 2. Variable arrow or function: const foo = async (a, b) => {  OR  const foo = function(a, b) {
+        # 2. Variable arrow or function: const foo = async <T>(a, b) => {  OR  const foo = function(a, b) {
         var_fn_regex = re.compile(
-            r'(?:export\s+)?(?:const|let|var)\s+([a-zA-Z0-9_$]+)\s*=\s*(?:async\s+)?(?:function\s*\*?\s*\(([^)]*)\)|\(([^)]*)\)\s*(?::\s*[^=]+)?\s*=>|([a-zA-Z0-9_$]+)\s*=>)',
+            r'(?:export\s+)?(?:const|let|var)\s+([a-zA-Z0-9_$]+)\s*=\s*(?:async\s+)?(?:\s*<[^()]+>)?\s*(?:function\s*\*?(?:\s*<[^()]+>)?\s*\(([^)]*)\)|\(([^)]*)\)\s*(?::\s*[^=]+)?\s*=>|([a-zA-Z0-9_$]+)\s*=>)',
             re.MULTILINE
         )
 
@@ -399,8 +438,12 @@ class PolyglotParser:
             else:
                 # Single expression arrow: const add = (a, b) => a + b;
                 semi_pos = cleaned_code.find(";", header_end)
-                nl_pos = cleaned_code.find("\n", header_end)
-                end_pos = min([p for p in (semi_pos, nl_pos, n) if p != -1])
+                decl_match = re.search(r'\n\s*(?:export|const|let|var|function|class)\b', cleaned_code[header_end:])
+                decl_pos = header_end + decl_match.start() if decl_match else -1
+                if semi_pos != -1 and (decl_pos == -1 or semi_pos < decl_pos):
+                    end_pos = semi_pos
+                else:
+                    end_pos = decl_pos if decl_pos != -1 else n
                 self._record_function(
                     name=name,
                     raw_args=raw_args,
