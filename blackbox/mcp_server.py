@@ -245,7 +245,11 @@ class BlackboxMCPServer:
         """Runs the reproduction test and issues a resolution receipt if the crash is fixed."""
         with self._resolve_ring(db_path) as ring:
             verifier = CausalVerifier(wal_ring=ring, db_path=db_path, receipt_path=receipt_path)
-            return verifier.verify(test_path=test_path)
+            target_test = test_path
+            if target_test == "test_blackbox_reproduce.py" and not os.path.isfile(target_test):
+                if os.path.isfile("test_blackbox_reproduce.mjs"):
+                    target_test = "test_blackbox_reproduce.mjs"
+            return verifier.verify(test_path=target_test)
 
     def test_candidate_patch(
         self,

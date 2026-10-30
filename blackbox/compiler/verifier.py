@@ -51,7 +51,10 @@ class CausalVerifier:
 
         start_time = time.perf_counter()
         try:
-            cmd = [sys.executable, "-m", "pytest", test_path, "-v"]
+            if test_path.endswith((".mjs", ".js", ".cjs", ".ts", ".tsx")):
+                cmd = ["node", "--test", test_path]
+            else:
+                cmd = [sys.executable, "-m", "pytest", test_path, "-v"]
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
             duration_ms = (time.perf_counter() - start_time) * 1000.0
             test_output = (proc.stdout + "\n" + proc.stderr).strip()

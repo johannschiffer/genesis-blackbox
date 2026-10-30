@@ -255,6 +255,14 @@ class StateDiffer:
             "variable_diff": variable_diff
         }
 
+    def compare_runs(
+        self,
+        baseline_run_id: Optional[str] = None,
+        failing_run_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Alias for diff() returning structured divergence report."""
+        return self.diff(baseline_run_id=baseline_run_id, failing_run_id=failing_run_id)
+
     def _align_and_find_divergence(
         self,
         b_events: List[Dict[str, Any]],

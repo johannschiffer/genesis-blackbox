@@ -401,6 +401,40 @@ EMBEDDED_HTML = """<!DOCTYPE html>
           </div>
         </section>
       </div>
+
+      <section class="card" aria-labelledby="diff-heading" style="margin-top: 20px;">
+        <div class="card-header">
+          <span id="diff-heading">Time-Travel Execution Diff</span>
+          <span id="diff-summary-badge" class="tag tag-sys">Awaiting Runs</span>
+        </div>
+        <div id="diff-container" style="padding: 16px;">
+          <div id="diff-meta" style="display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 12px; font-size: 0.88rem;">
+            <div><strong>Baseline Run:</strong> <span id="diff-baseline-id" class="mono muted">None</span></div>
+            <div><strong>Crashing Run:</strong> <span id="diff-failing-id" class="mono muted">None</span></div>
+            <div><strong>Divergence Point:</strong> <span id="diff-point-type" class="tag tag-exc">None</span></div>
+          </div>
+          <div id="diff-divergence-box" class="crash-banner" style="display: none; margin-bottom: 16px; padding: 12px;">
+            <strong id="diff-divergence-title">Root Divergence Point:</strong>
+            <p id="diff-divergence-desc" style="margin-top: 4px; font-size: 0.85rem;"></p>
+          </div>
+          <div style="overflow-x: auto;">
+            <table class="timeline-table">
+              <thead>
+                <tr>
+                  <th scope="col" style="width: 70px;">Step</th>
+                  <th scope="col" style="width: 250px;">Healthy Baseline Event</th>
+                  <th scope="col" style="width: 250px;">Crashing Run Event</th>
+                  <th scope="col" style="width: 110px;">Status</th>
+                  <th scope="col">Divergence / Mutation Details</th>
+                </tr>
+              </thead>
+              <tbody id="diff-body">
+                <tr><td colspan="5" class="empty-cell">No execution runs to compare yet. Run code with flight recorder.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
     </main>
   </div>
 
@@ -557,8 +591,126 @@ EMBEDDED_HTML = """<!DOCTYPE html>
       setTimeout(() => { statusEl.textContent = ''; }, 2500);
     }
 
-    fetchState();
-    setInterval(fetchState, 3000);
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    async function fetchDiff() {
+      const badge = document.getElementById('diff-summary-badge');
+      const baseEl = document.getElementById('diff-baseline-id');
+      const failEl = document.getElementById('diff-failing-id');
+      const typeEl = document.getElementById('diff-point-type');
+      const divBox = document.getElementById('diff-divergence-box');
+      const divTitle = document.getElementById('diff-divergence-title');
+      const divDesc = document.getElementById('diff-divergence-desc');
+      const tbody = document.getElementById('diff-body');
+
+      try {
+        const res = await fetch('/api/diff-runs');
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          badge.textContent = 'Needs 2 Runs';
+          badge.className = 'tag tag-sys';
+          renderDiffEmpty(tbody, errData.error || 'Diff requires at least 1 passing and 1 failing run in WAL.');
+          return;
+        }
+        const data = await res.json();
+        if (!data.baseline_run || !data.failing_run) {
+          badge.textContent = 'Awaiting Runs';
+          renderDiffEmpty(tbody, 'No execution runs available to compare.');
+          return;
+        }
+
+        baseEl.textContent = String(data.baseline_run.run_id) + ' (PASS)';
+        failEl.textContent = String(data.failing_run.run_id) + ' (FAIL)';
+
+        const div = data.divergence_point;
+        if (div) {
+          badge.textContent = 'Divergence Found';
+          badge.className = 'tag tag-exc';
+          typeEl.textContent = 'Step #' + div.step + ' (' + div.type + ')';
+          typeEl.className = 'tag tag-exc';
+
+          divBox.style.display = 'block';
+          divTitle.textContent = 'Root Divergence Point: Step #' + div.step + ' (' + div.type + ')';
+          divDesc.textContent = div.description;
+        } else {
+          badge.textContent = 'Runs Match';
+          badge.className = 'tag tag-sql';
+          typeEl.textContent = 'Identical';
+          typeEl.className = 'tag tag-sql';
+          divBox.style.display = 'none';
+        }
+
+        const alignments = Array.isArray(data.alignment_diff) ? data.alignment_diff : [];
+        if (alignments.length === 0) {
+          renderDiffEmpty(tbody, 'No alignment events recorded.');
+          return;
+        }
+
+        const fragment = document.createDocumentFragment();
+        for (const al of alignments) {
+          const tr = document.createElement('tr');
+
+          const tdStep = document.createElement('td');
+          tdStep.className = 'mono';
+          tdStep.textContent = '#' + al.step;
+
+          const tdBase = document.createElement('td');
+          tdBase.className = 'mono muted';
+          tdBase.textContent = String(al.baseline || '-');
+
+          const tdFail = document.createElement('td');
+          tdFail.className = 'mono';
+          tdFail.textContent = String(al.failing || '-');
+
+          const tdStatus = document.createElement('td');
+          const spanTag = document.createElement('span');
+          spanTag.className = 'tag ' + (al.aligned ? 'tag-sql' : 'tag-exc');
+          spanTag.textContent = al.aligned ? 'MATCH' : 'DIVERGED';
+          tdStatus.appendChild(spanTag);
+
+          const tdNote = document.createElement('td');
+          tdNote.className = al.aligned ? 'muted' : '';
+          tdNote.textContent = String(al.diff_note || '-');
+
+          tr.appendChild(tdStep);
+          tr.appendChild(tdBase);
+          tr.appendChild(tdFail);
+          tr.appendChild(tdStatus);
+          tr.appendChild(tdNote);
+          fragment.appendChild(tr);
+        }
+        tbody.replaceChildren(fragment);
+      } catch (_) {
+        badge.textContent = 'Diff Offline';
+      }
+    }
+
+    function renderDiffEmpty(tbody, msg) {
+      tbody.replaceChildren();
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = 5;
+      td.className = 'empty-cell';
+      td.textContent = msg;
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    }
+
+    function refreshAll() {
+      fetchState();
+      fetchDiff();
+    }
+
+    refreshAll();
+    setInterval(refreshAll, 3000);
   </script>
 </body>
 </html>
@@ -598,6 +750,8 @@ class BlackboxUIRequestHandler(BaseHTTPRequestHandler):
             self._handle_api_autopsy()
         elif path == "/api/blast-radius":
             self._handle_api_blast_radius(query)
+        elif path == "/api/diff-runs":
+            self._handle_api_diff_runs(query)
         elif path == "/api/status":
             self._handle_api_status()
         else:
@@ -685,6 +839,17 @@ class BlackboxUIRequestHandler(BaseHTTPRequestHandler):
                 "dependencies": {n: list(self.ast_graph.nodes[n].get("calls", [])) for n in nodes}
             }
         self._send_json(res)
+
+    def _handle_api_diff_runs(self, query):
+        baseline = query.get("baseline", [None])[0]
+        failing = query.get("failing", [None])[0]
+        from ..compiler.state_differ import StateDiffer
+        differ = StateDiffer(wal_ring=self.wal_ring)
+        try:
+            diff_res = differ.compare_runs(baseline_run_id=baseline, failing_run_id=failing)
+            self._send_json(diff_res)
+        except Exception as e:
+            self._send_json({"error": str(e)}, status=400)
 
     def _handle_api_status(self):
         resp_data = {

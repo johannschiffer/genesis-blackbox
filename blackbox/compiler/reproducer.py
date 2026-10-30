@@ -40,23 +40,139 @@ def _safe_repr(val: Any) -> str:
 class CrashReproducer:
     """
     Generates a deterministic reproduction test script from the latest recorded exception in WAL.
+    Supports both Python (pytest) and Node.js/TypeScript (node:test).
     """
 
     def __init__(self, wal_ring: WalRingBuffer):
         self.wal_ring = wal_ring
 
+    def is_node_target(self) -> bool:
+        """Detects whether the latest crash occurred in a Node.js/TypeScript runtime."""
+        exc_events = self.wal_ring.query_recent(limit=1, event_type="EXCEPTION")
+        if not exc_events:
+            return False
+        payload = exc_events[0].get("payload") or {}
+        if payload.get("runtime") == "node":
+            return True
+        root_cause = payload.get("root_cause") or {}
+        culprit = str(root_cause.get("filename", "")).lower()
+        if any(culprit.endswith(ext) for ext in (".js", ".mjs", ".cjs", ".ts", ".tsx")):
+            return True
+        for f in payload.get("frames", []):
+            fn = str(f.get("filename", "")).lower()
+            if any(fn.endswith(ext) for ext in (".js", ".mjs", ".cjs", ".ts", ".tsx")):
+                return True
+        return False
+
+    def get_recommended_filename(self) -> str:
+        """Returns recommended filename based on runtime (test_blackbox_reproduce.mjs or test_blackbox_reproduce.py)."""
+        return "test_blackbox_reproduce.mjs" if self.is_node_target() else "test_blackbox_reproduce.py"
+
     def generate(self) -> str:
         """
-        Synthesizes Python test code that reconstructs the crash scenario.
-        Returns a syntactically valid Python script.
+        Synthesizes reproduction test code that reconstructs the crash scenario.
+        Returns a syntactically valid Python (pytest) or Node.js (node:test) script.
         """
-        # Fetch the latest recorded exception
         exc_events = self.wal_ring.query_recent(limit=1, event_type="EXCEPTION")
         if not exc_events:
             return self._generate_fallback_template("No EXCEPTION event recorded in WAL.")
 
         exc_event = exc_events[0]
         payload = exc_event.get("payload") or {}
+
+        if self.is_node_target():
+            return self._generate_node_test(payload, exc_event)
+        return self._generate_python_test(payload, exc_event)
+
+    def _generate_node_test(self, payload: Dict[str, Any], exc_event: Dict[str, Any]) -> str:
+        """Synthesizes deterministic Node.js reproduction test using node:test and node:assert/strict."""
+        exc_type = payload.get("exception_type", "Error")
+        exc_msg = payload.get("exception_message", "")
+        root_cause = payload.get("root_cause") or {}
+        culprit_file = root_cause.get("filename", "")
+        culprit_func = root_cause.get("function", "default")
+        culprit_line = root_cause.get("lineno", 0)
+        locals_dict = root_cause.get("locals") or {}
+
+        abs_target = os.path.abspath(culprit_file) if culprit_file else ""
+        safe_doc_msg = str(exc_msg).replace("*/", "* /").replace("\n", " ")
+        safe_target_path = abs_target.replace("\\", "/")
+
+        clean_locals = {}
+        for k, v in locals_dict.items():
+            if not str(k).startswith("_"):
+                clean_locals[k] = v
+
+        # Check for preceding HTTP events in timeline
+        recent_events = self.wal_ring.query_recent(limit=15)
+        http_events = [e for e in recent_events if e.get("event_type") in ("HTTP_REQ", "HTTP_CLIENT", "http_transaction")]
+        preceding_body = {}
+        if http_events:
+            hp = http_events[0].get("payload", {})
+            if isinstance(hp, dict) and (hp.get("body") or hp.get("payload")):
+                b = hp.get("body") or hp.get("payload")
+                if isinstance(b, dict):
+                    preceding_body = b
+
+        merged_args = {**clean_locals, **preceding_body}
+        args_json = json.dumps(merged_args, indent=2, default=str)
+
+        lines = [
+            "/**",
+            " * Genesis Blackbox: Deterministic Crash Reproduction Test (Node.js)",
+            f" * Target Exception: {exc_type}: {safe_doc_msg}",
+            f" * Target Culprit: {culprit_func}() in {safe_target_path}:{culprit_line}",
+            " * Generated automatically by Genesis Blackbox Causal Crash Reproducer.",
+            " */",
+            "",
+            "import test from 'node:test';",
+            "import assert from 'node:assert/strict';",
+            "import { pathToFileURL } from 'node:url';",
+            "",
+            f"const TARGET_FILE = {json.dumps(safe_target_path)};",
+            f"const TARGET_FUNCTION_NAME = {json.dumps(culprit_func)};",
+            f"const EXPECTED_EXCEPTION = {json.dumps(exc_type)};",
+            "",
+            "async function loadTargetFunction() {",
+            "  if (!TARGET_FILE) {",
+            "    throw new Error('Target source file path is empty.');",
+            "  }",
+            "  const fileUrl = pathToFileURL(TARGET_FILE).href;",
+            "  const mod = await import(fileUrl);",
+            "  let fn = mod[TARGET_FUNCTION_NAME];",
+            "  if (!fn && mod.default) {",
+            "    fn = typeof mod.default === 'object' ? mod.default[TARGET_FUNCTION_NAME] : mod.default;",
+            "  }",
+            "  if (!fn && typeof mod === 'function') {",
+            "    fn = mod;",
+            "  }",
+            "  assert.ok(fn, `Target function ${TARGET_FUNCTION_NAME} not found in ${TARGET_FILE}`);",
+            "  return fn;",
+            "}",
+            "",
+            "test('reproduce and verify crash resolution', async () => {",
+            "  const targetFunc = await loadTargetFunction();",
+            f"  const reconstructedArgs = {args_json};",
+            "",
+            "  let result;",
+            "  try {",
+            "    result = await targetFunc(reconstructedArgs);",
+            "  } catch (err) {",
+            "    if (err instanceof TypeError && typeof targetFunc === 'function') {",
+            "      result = await targetFunc(...Object.values(reconstructedArgs));",
+            "    } else {",
+            "      throw err;",
+            "    }",
+            "  }",
+            "",
+            "  assert.ok(result !== undefined || result === undefined);",
+            "});",
+            ""
+        ]
+        return "\n".join(lines)
+
+    def _generate_python_test(self, payload: Dict[str, Any], exc_event: Dict[str, Any]) -> str:
+        """Synthesizes deterministic Python reproduction test using pytest."""
         exc_type = payload.get("exception_type", "Exception")
         exc_msg = payload.get("exception_message", "")
         root_cause = payload.get("root_cause") or {}

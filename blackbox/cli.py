@@ -199,13 +199,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         ring = WalRingBuffer(db_path=args.db)
         reproducer = CrashReproducer(wal_ring=ring)
         code = reproducer.generate()
+        out_target = args.output
+        if out_target == "test_reproduce.py" and reproducer.is_node_target():
+            out_target = "test_blackbox_reproduce.mjs"
 
-        if args.output and args.output != "-":
-            out_path = os.path.abspath(args.output)
+        if out_target and out_target != "-":
+            out_path = os.path.abspath(out_target)
             os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
             with open(out_path, "w", encoding="utf-8") as f:
                 f.write(code)
-            print(f"[Genesis-Blackbox] Reproduction test written to {args.output}")
+            print(f"[Genesis-Blackbox] Reproduction test written to {out_target}")
         else:
             print(code)
         return 0
@@ -239,7 +242,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     elif args.command == "verify":
         ring = WalRingBuffer(db_path=args.db)
         verifier = CausalVerifier(wal_ring=ring, db_path=args.db, receipt_path=args.receipt)
-        result = verifier.verify(test_path=args.test)
+        test_file = args.test
+        if test_file == "test_blackbox_reproduce.py" and not os.path.isfile(test_file):
+            if os.path.isfile("test_blackbox_reproduce.mjs"):
+                test_file = "test_blackbox_reproduce.mjs"
+            elif os.path.isfile("test_reproduce.py"):
+                test_file = "test_reproduce.py"
+        result = verifier.verify(test_path=test_file)
 
         if result.get("resolved"):
             dur = result.get("duration_ms", 0)
