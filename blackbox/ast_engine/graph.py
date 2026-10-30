@@ -7,6 +7,10 @@ import os
 import ast
 import subprocess
 from typing import Dict, Any, List, Set, Optional
+from .polyglot import PolyglotParser
+
+POLYGLOT_EXTENSIONS = (".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
+JS_TS_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
 
 
 class FunctionNodeVisitor(ast.NodeVisitor):
@@ -53,6 +57,20 @@ class CodebaseGraph:
         self.callers_map: Dict[str, Set[str]] = {}
 
     def parse_source(self, code_str: str, filename: str = "<source>") -> None:
+        if filename.endswith(JS_TS_EXTENSIONS):
+            try:
+                parser = PolyglotParser(filename)
+                res = parser.parse(code_str)
+                for f_name, data in res["functions"].items():
+                    self.nodes[f_name] = data
+                    for callee in data["calls"]:
+                        if callee not in self.callers_map:
+                            self.callers_map[callee] = set()
+                        self.callers_map[callee].add(f_name)
+            except Exception:
+                pass
+            return
+
         try:
             tree = ast.parse(code_str, filename=filename)
             visitor = FunctionNodeVisitor(filename)
@@ -79,7 +97,7 @@ class CodebaseGraph:
             return False
 
     def parse_directory(self, dir_path: str, max_files: int = 50) -> int:
-        """Parses all Python files within a directory up to max_files."""
+        """Parses all Python and TypeScript/JavaScript files within a directory up to max_files."""
         excluded_dirs = {
             ".venv", "venv", ".git", "node_modules", "__pycache__",
             ".pytest_cache", "build", "dist", ".tox", ".mypy_cache"
@@ -88,7 +106,7 @@ class CodebaseGraph:
         for root, dirs, files in os.walk(dir_path):
             dirs[:] = [d for d in dirs if d not in excluded_dirs and not d.endswith(".egg-info")]
             for file in files:
-                if file.endswith(".py"):
+                if file.endswith(POLYGLOT_EXTENSIONS):
                     full_path = os.path.join(root, file)
                     if self.parse_file(full_path):
                         count += 1

@@ -103,15 +103,50 @@ def run_target(cmd_args, db_path: str = ".blackbox/wal.sqlite") -> int:
         env["PYTHONPATH"] = os.pathsep.join(path_parts)
 
         ring.record(event_type="SUBPROCESS_START", payload={"command": cmd_args}, source="blackbox_runner")
+        is_node = any(
+            cmd_args[0].endswith(x)
+            for x in ("node", "npm", "npx", "yarn", "pnpm", "bun", "deno", "tsx", "ts-node")
+        ) or any(
+            cmd_args[0].endswith(ext)
+            for ext in (".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs")
+        )
+
         try:
-            proc = subprocess.run(cmd_args, env=env)
-            ring.record(
-                event_type="SUBPROCESS_EXIT",
-                payload={"command": cmd_args, "returncode": proc.returncode},
-                source="blackbox_runner",
-                status="ok" if proc.returncode == 0 else "error"
-            )
-            return proc.returncode
+            if is_node:
+                proc = subprocess.run(cmd_args, env=env, capture_output=True, text=True)
+                if proc.stdout:
+                    sys.stdout.write(proc.stdout)
+                    sys.stdout.flush()
+                if proc.stderr:
+                    sys.stderr.write(proc.stderr)
+                    sys.stderr.flush()
+                status = "ok" if proc.returncode == 0 else "error"
+                ring.record(
+                    event_type="SUBPROCESS_EXIT",
+                    payload={"command": cmd_args, "returncode": proc.returncode},
+                    source="blackbox_runner",
+                    status=status
+                )
+                if proc.returncode != 0 and proc.stderr:
+                    from ..ast_engine.polyglot import parse_v8_stack_trace
+                    v8_exc = parse_v8_stack_trace(proc.stderr)
+                    if v8_exc:
+                        ring.record(
+                            event_type="EXCEPTION",
+                            payload=v8_exc,
+                            source="node_runner",
+                            status="error"
+                        )
+                return proc.returncode
+            else:
+                proc = subprocess.run(cmd_args, env=env)
+                ring.record(
+                    event_type="SUBPROCESS_EXIT",
+                    payload={"command": cmd_args, "returncode": proc.returncode},
+                    source="blackbox_runner",
+                    status="ok" if proc.returncode == 0 else "error"
+                )
+                return proc.returncode
         except Exception as e:
             ring.record(
                 event_type="SUBPROCESS_ERROR",

@@ -239,7 +239,14 @@ class CausalCrashCompiler:
                 is_culprit = " (CRASH POINT)" if f == root_cause else ""
                 md.append(f"### Frame {i + 1}: `{f.get('function')}()` in `{f.get('filename')}:{f.get('lineno')}`{is_culprit}")
                 if f.get("code_line"):
-                    md.append(f"```python\n{f.get('code_line').strip()}\n```")
+                    fn_name = str(f.get("filename", ""))
+                    if fn_name.endswith((".ts", ".tsx")):
+                        lang = "typescript"
+                    elif fn_name.endswith((".js", ".jsx", ".mjs", ".cjs")):
+                        lang = "javascript"
+                    else:
+                        lang = "python"
+                    md.append(f"```{lang}\n{f.get('code_line').strip()}\n```")
                 f_locals = f.get("locals", {})
                 if f_locals and f != root_cause:
                     sample_locals = list(f_locals.items())[:5]

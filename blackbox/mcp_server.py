@@ -185,6 +185,40 @@ class BlackboxMCPServer:
                     patch_diff=args["patch_diff"],
                     test_path=args.get("test_path", "test_blackbox_reproduce.py")
                 )
+            },
+            "compare_execution_runs": {
+                "name": "compare_execution_runs",
+                "description": "Compares the last passing execution run against the latest failing run stored in WAL, pinpointing exact divergence in SQL queries, HTTP payloads, and variable states.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "db_path": {
+                            "type": "string",
+                            "description": "Path to WAL SQLite database (default: .blackbox/wal.sqlite)",
+                            "default": ".blackbox/wal.sqlite"
+                        },
+                        "baseline_run_id": {
+                            "type": "string",
+                            "description": "Optional explicit baseline healthy run ID"
+                        },
+                        "failing_run_id": {
+                            "type": "string",
+                            "description": "Optional explicit failing run ID"
+                        },
+                        "format": {
+                            "type": "string",
+                            "enum": ["markdown", "json"],
+                            "description": "Output format: 'markdown' (default) or 'json'",
+                            "default": "markdown"
+                        }
+                    }
+                },
+                "handler": lambda args: self.compare_execution_runs(
+                    db_path=args.get("db_path", self.default_db_path),
+                    baseline_run_id=args.get("baseline_run_id"),
+                    failing_run_id=args.get("failing_run_id"),
+                    output_format=args.get("format", "markdown")
+                )
             }
         }
         self.tools["blackbox_get_crash_autopsy"] = self.tools["get_crash_autopsy"]
@@ -194,6 +228,7 @@ class BlackboxMCPServer:
         self.tools["blackbox_generate_reproduction_test"] = self.tools["generate_reproduction_test"]
         self.tools["blackbox_verify_crash_resolution"] = self.tools["verify_crash_resolution"]
         self.tools["blackbox_test_candidate_patch"] = self.tools["test_candidate_patch"]
+        self.tools["blackbox_compare_execution_runs"] = self.tools["compare_execution_runs"]
 
     def generate_reproduction_test(self, db_path: str = ".blackbox/wal.sqlite") -> str:
         """Synthesizes and returns standalone Python reproduction test script from WAL database."""
@@ -220,6 +255,22 @@ class BlackboxMCPServer:
         """Validates a candidate patch diff in an isolated environment with guaranteed rollback."""
         validator = PatchValidator(repo_root=".", db_path=self.default_db_path)
         return validator.evaluate_patch(patch_str=patch_diff, test_path=test_path)
+
+    def compare_execution_runs(
+        self,
+        db_path: str = ".blackbox/wal.sqlite",
+        baseline_run_id: Optional[str] = None,
+        failing_run_id: Optional[str] = None,
+        output_format: str = "markdown"
+    ) -> Any:
+        """Compares baseline healthy execution run against latest failing run."""
+        from .compiler.state_differ import StateDiffer
+        with self._resolve_ring(db_path) as ring:
+            differ = StateDiffer(wal_ring=ring)
+            diff_res = differ.diff(baseline_run_id=baseline_run_id, failing_run_id=failing_run_id)
+            if output_format == "json":
+                return diff_res
+            return differ.compile_markdown(diff_res)
 
     def get_crash_autopsy(self, db_path: str = ".blackbox/wal.sqlite") -> str:
         """Compiles and returns .blackbox.md autopsy markdown from WAL database."""

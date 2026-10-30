@@ -9,7 +9,8 @@ import sys
 import ast
 import subprocess
 from typing import Dict, Any, List, Set, Optional
-from .graph import CodebaseGraph
+from .graph import CodebaseGraph, POLYGLOT_EXTENSIONS, JS_TS_EXTENSIONS
+from .polyglot import PolyglotParser
 
 
 class TestDependencyVisitor(ast.NodeVisitor):
@@ -64,7 +65,7 @@ class ImpactTestSelector:
         self.graph = graph or CodebaseGraph()
 
     def get_modified_files_from_git(self) -> List[str]:
-        """Retrieves list of modified Python files from git working tree."""
+        """Retrieves list of modified Python and TypeScript/JavaScript files from git working tree."""
         modified = []
         try:
             # 1. Unstaged and staged files
@@ -75,7 +76,7 @@ class ImpactTestSelector:
                     parts = line.strip().split()
                     if len(parts) >= 2:
                         filepath = parts[-1]
-                        if filepath.endswith(".py"):
+                        if filepath.endswith(POLYGLOT_EXTENSIONS):
                             full_path = os.path.normpath(os.path.join(self.root_dir, filepath))
                             if os.path.exists(full_path) and full_path not in modified:
                                 modified.append(full_path)
@@ -87,7 +88,7 @@ class ImpactTestSelector:
                 if res_diff.returncode == 0:
                     for line in res_diff.stdout.splitlines():
                         filepath = line.strip()
-                        if filepath.endswith(".py"):
+                        if filepath.endswith(POLYGLOT_EXTENSIONS):
                             full_path = os.path.normpath(os.path.join(self.root_dir, filepath))
                             if os.path.exists(full_path) and full_path not in modified:
                                 modified.append(full_path)
@@ -96,10 +97,17 @@ class ImpactTestSelector:
         return modified
 
     def extract_symbols_from_file(self, file_path: str) -> Set[str]:
-        """Extracts defined function and class names from a Python source file."""
+        """Extracts defined function and class names from a Python or TypeScript/JS source file."""
         symbols = set()
         if not os.path.isfile(file_path):
             return symbols
+        if file_path.endswith(JS_TS_EXTENSIONS):
+            try:
+                with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                    res = PolyglotParser(file_path).parse(f.read())
+                    return set(res["defined_symbols"])
+            except Exception:
+                return symbols
         try:
             with open(file_path, "r", encoding="utf-8", errors="replace") as f:
                 tree = ast.parse(f.read(), filename=file_path)
@@ -111,14 +119,18 @@ class ImpactTestSelector:
         return symbols
 
     def discover_test_files(self, search_dir: Optional[str] = None) -> List[str]:
-        """Discovers all test_*.py and *_test.py files in the target directory."""
+        """Discovers all Python (test_*.py) and JS/TS (*.test.ts, *.spec.js) files in the target directory."""
         base = search_dir or self.root_dir
         test_files = []
+        js_ts_test_suffixes = (
+            ".test.ts", ".test.tsx", ".test.js", ".test.jsx",
+            ".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx"
+        )
         for root, dirs, files in os.walk(base):
             # Exclude virtual environments and cache directories
-            dirs[:] = [d for d in dirs if d not in (".venv", "venv", ".git", "__pycache__", ".pytest_cache")]
+            dirs[:] = [d for d in dirs if d not in (".venv", "venv", ".git", "node_modules", "__pycache__", ".pytest_cache")]
             for f in files:
-                if (f.startswith("test_") or f.endswith("_test.py")) and f.endswith(".py"):
+                if ((f.startswith("test_") or f.endswith("_test.py")) and f.endswith(".py")) or f.endswith(js_ts_test_suffixes):
                     test_files.append(os.path.normpath(os.path.join(root, f)))
         return sorted(test_files)
 
@@ -145,9 +157,13 @@ class ImpactTestSelector:
         impacted_tests: Set[str] = set()
 
         # Step 1: If target file is itself a test file, it is directly impacted
+        js_ts_test_suffixes = (
+            ".test.ts", ".test.tsx", ".test.js", ".test.jsx",
+            ".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx"
+        )
         for f in normalized_targets:
             base_name = os.path.basename(f)
-            if base_name.startswith("test_") or base_name.endswith("_test.py"):
+            if (base_name.startswith("test_") or base_name.endswith("_test.py")) or base_name.endswith(js_ts_test_suffixes):
                 impacted_tests.add(f)
 
         source_symbols: Set[str] = set()
@@ -170,8 +186,13 @@ class ImpactTestSelector:
 
             # Compute possible module import paths
             rel_path = os.path.relpath(f, self.root_dir)
-            mod_path = rel_path.replace(os.sep, ".").replace(".py", "")
+            mod_path = rel_path.replace(os.sep, ".")
+            for ext in (".py", ".tsx", ".jsx", ".ts", ".js", ".mjs", ".cjs"):
+                if mod_path.endswith(ext):
+                    mod_path = mod_path[:-len(ext)]
+                    break
             source_modules.add(mod_path)
+            source_modules.add(base_no_ext)
             if "." in mod_path:
                 source_modules.add(mod_path.split(".")[-1])
 
@@ -179,17 +200,47 @@ class ImpactTestSelector:
         all_tests = self.discover_test_files(tests_dir)
 
         for test_file in all_tests:
-            # Check name conventions (e.g., test_calculator.py maps to calculator.py)
-            test_base = os.path.splitext(os.path.basename(test_file))[0]
+            # Check name conventions (e.g., test_calculator.py maps to calculator.py, order.test.ts maps to order.ts)
+            test_base = os.path.basename(test_file)
+            for suffix in js_ts_test_suffixes:
+                if test_base.endswith(suffix):
+                    test_base = test_base[:-len(suffix)]
+                    break
+            else:
+                test_base = os.path.splitext(test_base)[0]
+
             for src_base in source_basenames:
-                if test_base == f"test_{src_base}" or test_base == f"{src_base}_test" or src_base in test_base:
+                if (test_base == f"test_{src_base}" or test_base == f"{src_base}_test" or
+                    test_base == src_base or src_base in test_base):
                     impacted_tests.add(test_file)
                     break
 
             if test_file in impacted_tests:
                 continue
 
-            # Parse test file AST to inspect imports and calls
+            # Parse test file to inspect imports and calls
+            if test_file.endswith(JS_TS_EXTENSIONS):
+                try:
+                    with open(test_file, "r", encoding="utf-8", errors="replace") as tf:
+                        p_res = PolyglotParser(test_file).parse(tf.read())
+                    test_mods = set()
+                    for m in p_res["imported_modules"]:
+                        clean_m = os.path.splitext(os.path.basename(m))[0]
+                        test_mods.add(m)
+                        test_mods.add(clean_m)
+                    if any(m in test_mods for m in source_modules) or any(m in test_mods for m in source_basenames):
+                        impacted_tests.add(test_file)
+                        continue
+                    all_test_syms = set(p_res["imported_symbols"])
+                    for fn in p_res["functions"].values():
+                        all_test_syms.update(fn.get("calls", []))
+                    if any(s in all_test_syms for s in source_symbols):
+                        impacted_tests.add(test_file)
+                        continue
+                except Exception:
+                    pass
+                continue
+
             try:
                 with open(test_file, "r", encoding="utf-8", errors="replace") as tf:
                     tree = ast.parse(tf.read(), filename=test_file)
@@ -211,8 +262,15 @@ class ImpactTestSelector:
         return sorted(list(impacted_tests))
 
     def run_impacted_tests(self, test_nodes: List[str]) -> subprocess.CompletedProcess:
-        """Executes pytest against the specified impacted test nodes."""
+        """Executes pytest or Node test runner against the specified impacted test nodes."""
         if not test_nodes:
             return subprocess.CompletedProcess(args=[], returncode=0, stdout="No tests to run.", stderr="")
-        cmd = [sys.executable, "-m", "pytest"] + test_nodes + ["-v"]
+        py_tests = [t for t in test_nodes if t.endswith(".py")]
+        js_tests = [t for t in test_nodes if t.endswith(JS_TS_EXTENSIONS)]
+
+        if js_tests and not py_tests:
+            cmd = ["node", "--test"] + js_tests
+            return subprocess.run(cmd, cwd=self.root_dir, capture_output=True, text=True)
+
+        cmd = [sys.executable, "-m", "pytest"] + (py_tests or test_nodes) + ["-v"]
         return subprocess.run(cmd, cwd=self.root_dir, capture_output=True, text=True)

@@ -98,6 +98,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     impact_parser.add_argument("--run", action="store_true", default=False, help="Automatically run impacted tests with pytest")
     impact_parser.add_argument("--root", default=".", help="Project root directory (default: .)")
 
+    # Subcommand: diff-runs
+    diff_parser = subparsers.add_parser("diff-runs", help="Compare baseline healthy execution run against latest failing run")
+    diff_parser.add_argument("--db", default=".blackbox/wal.sqlite", help="Path to WAL database (default: .blackbox/wal.sqlite)")
+    diff_parser.add_argument("--output", default=None, help="Output markdown diff file (e.g. .blackbox-diff.md)")
+    diff_parser.add_argument("--json", action="store_true", help="Output structured JSON instead of markdown")
+    diff_parser.add_argument("--baseline", default=None, help="Explicit baseline healthy run ID")
+    diff_parser.add_argument("--failing", default=None, help="Explicit failing run ID")
+
     args = parser.parse_args(argv)
 
 
@@ -272,6 +280,31 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(res.stderr, file=sys.stderr)
             return res.returncode
         return 0
+
+    elif args.command == "diff-runs":
+        from .compiler.state_differ import StateDiffer
+        differ = StateDiffer(db_path=args.db)
+        try:
+            diff_res = differ.diff(baseline_run_id=args.baseline, failing_run_id=args.failing)
+            if args.json:
+                out_content = json.dumps(diff_res, indent=2, default=str)
+            else:
+                out_content = differ.compile_markdown(diff_res)
+
+            if args.output and args.output != "-":
+                out_path = os.path.abspath(args.output)
+                os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+                with open(out_path, "w", encoding="utf-8") as f:
+                    f.write(out_content)
+                print(f"[Genesis-Blackbox] Execution diff written to {args.output}")
+            else:
+                print(out_content)
+            return 0
+        except Exception as e:
+            print(f"[Genesis-Blackbox] Diff error: {e}", file=sys.stderr)
+            return 1
+        finally:
+            differ.close()
 
     return 0
 
