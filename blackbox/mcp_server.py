@@ -219,6 +219,29 @@ class BlackboxMCPServer:
                     failing_run_id=args.get("failing_run_id"),
                     output_format=args.get("format", "markdown")
                 )
+            },
+            "get_repair_prompt": {
+                "name": "get_repair_prompt",
+                "description": "Synthesizes an all-in-one AI agent repair prompt packet combining crash autopsy, polyglot reproduction tests, AST blast-radius, and execution diffs.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "db_path": {
+                            "type": "string",
+                            "description": "Path to WAL SQLite database (default: .blackbox/wal.sqlite)",
+                            "default": ".blackbox/wal.sqlite"
+                        },
+                        "repo_root": {
+                            "type": "string",
+                            "description": "Project root directory (default: .)",
+                            "default": "."
+                        }
+                    }
+                },
+                "handler": lambda args: self.get_repair_prompt(
+                    db_path=args.get("db_path", self.default_db_path),
+                    repo_root=args.get("repo_root", ".")
+                )
             }
         }
         self.tools["blackbox_get_crash_autopsy"] = self.tools["get_crash_autopsy"]
@@ -229,6 +252,7 @@ class BlackboxMCPServer:
         self.tools["blackbox_verify_crash_resolution"] = self.tools["verify_crash_resolution"]
         self.tools["blackbox_test_candidate_patch"] = self.tools["test_candidate_patch"]
         self.tools["blackbox_compare_execution_runs"] = self.tools["compare_execution_runs"]
+        self.tools["blackbox_get_repair_prompt"] = self.tools["get_repair_prompt"]
 
     def generate_reproduction_test(self, db_path: str = ".blackbox/wal.sqlite") -> str:
         """Synthesizes and returns standalone Python reproduction test script from WAL database."""
@@ -275,6 +299,17 @@ class BlackboxMCPServer:
             if output_format == "json":
                 return diff_res
             return differ.compile_markdown(diff_res)
+
+    def get_repair_prompt(
+        self,
+        db_path: str = ".blackbox/wal.sqlite",
+        repo_root: str = "."
+    ) -> str:
+        """Synthesizes and returns complete AI repair prompt packet from WAL database."""
+        from .compiler.prompt_synth import PromptSynthesizer
+        with self._resolve_ring(db_path) as ring:
+            synth = PromptSynthesizer(wal_ring=ring, repo_root=repo_root, db_path=db_path)
+            return synth.synthesize()
 
     def get_crash_autopsy(self, db_path: str = ".blackbox/wal.sqlite") -> str:
         """Compiles and returns .blackbox.md autopsy markdown from WAL database."""

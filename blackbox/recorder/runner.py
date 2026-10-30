@@ -102,7 +102,17 @@ def run_target(cmd_args, db_path: str = ".blackbox/wal.sqlite") -> int:
         path_parts = [bootstrap_dir, pkg_dir] + ([existing_pp] if existing_pp else [])
         env["PYTHONPATH"] = os.pathsep.join(path_parts)
 
-        ring.record(event_type="SUBPROCESS_START", payload={"command": cmd_args}, source="blackbox_runner")
+        # Prepare Node.js preload hook alongside Python sitecustomize
+        from .node_preload import write_node_preload_script, ingest_node_spool
+        preload_path = write_node_preload_script(bootstrap_dir)
+        spool_path = os.path.join(bootstrap_dir, "blackbox_node_spool.jsonl")
+        env["BLACKBOX_NODE_SPOOL"] = spool_path
+
+        existing_node_opts = env.get("NODE_OPTIONS", "")
+        req_opt = f"--require {preload_path}"
+        env["NODE_OPTIONS"] = f"{req_opt} {existing_node_opts}".strip()
+
+        start_eid = ring.record(event_type="SUBPROCESS_START", payload={"command": cmd_args}, source="blackbox_runner")
         is_node = any(
             cmd_args[0].endswith(x)
             for x in ("node", "npm", "npx", "yarn", "pnpm", "bun", "deno", "tsx", "ts-node")
@@ -127,16 +137,22 @@ def run_target(cmd_args, db_path: str = ".blackbox/wal.sqlite") -> int:
                     source="blackbox_runner",
                     status=status
                 )
+                # Ingest active runtime events captured in Node spool
+                ingest_node_spool(spool_path, ring)
+
                 if proc.returncode != 0 and proc.stderr:
-                    from ..ast_engine.polyglot import parse_v8_stack_trace
-                    v8_exc = parse_v8_stack_trace(proc.stderr)
-                    if v8_exc:
-                        ring.record(
-                            event_type="EXCEPTION",
-                            payload=v8_exc,
-                            source="node_runner",
-                            status="error"
-                        )
+                    # Check if an EXCEPTION was already recorded by the preload hook in this run
+                    recent_excs = [e for e in ring.query_recent(limit=10, event_type="EXCEPTION") if e.get("id", 0) > start_eid]
+                    if not recent_excs:
+                        from ..ast_engine.polyglot import parse_v8_stack_trace
+                        v8_exc = parse_v8_stack_trace(proc.stderr)
+                        if v8_exc:
+                            ring.record(
+                                event_type="EXCEPTION",
+                                payload=v8_exc,
+                                source="node_runner",
+                                status="error"
+                            )
                 return proc.returncode
             else:
                 proc = subprocess.run(cmd_args, env=env)
@@ -146,6 +162,7 @@ def run_target(cmd_args, db_path: str = ".blackbox/wal.sqlite") -> int:
                     source="blackbox_runner",
                     status="ok" if proc.returncode == 0 else "error"
                 )
+                ingest_node_spool(spool_path, ring)
                 return proc.returncode
         except Exception as e:
             ring.record(

@@ -106,6 +106,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     diff_parser.add_argument("--baseline", default=None, help="Explicit baseline healthy run ID")
     diff_parser.add_argument("--failing", default=None, help="Explicit failing run ID")
 
+    # Subcommand: pack
+    pack_parser = subparsers.add_parser("pack", help="Synthesize autonomous AI agent repair prompt packet")
+    pack_parser.add_argument("--db", default=".blackbox/wal.sqlite", help="Path to WAL database (default: .blackbox/wal.sqlite)")
+    pack_parser.add_argument("--output", default=None, help="Output prompt markdown file (default: stdout)")
+    pack_parser.add_argument("--root", default=".", help="Project root directory (default: .)")
+
     args = parser.parse_args(argv)
 
 
@@ -314,6 +320,24 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 1
         finally:
             differ.close()
+
+    elif args.command == "pack":
+        from .compiler.prompt_synth import PromptSynthesizer
+        ring = WalRingBuffer(db_path=args.db)
+        try:
+            synth = PromptSynthesizer(wal_ring=ring, repo_root=args.root, db_path=args.db)
+            prompt_md = synth.synthesize()
+            if args.output and args.output != "-":
+                out_path = os.path.abspath(args.output)
+                os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+                with open(out_path, "w", encoding="utf-8") as f:
+                    f.write(prompt_md)
+                print(f"[Genesis-Blackbox] Repair prompt packet written to {args.output}")
+            else:
+                print(prompt_md)
+            return 0
+        finally:
+            ring.close()
 
     return 0
 

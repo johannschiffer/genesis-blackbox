@@ -21,6 +21,7 @@ from .compiler.reproducer import CrashReproducer
 from .compiler.verifier import CausalVerifier
 from .compiler.patch_validator import PatchValidator
 from .compiler.state_differ import StateDiffer
+from .compiler.prompt_synth import PromptSynthesizer
 from .ci.github_summary import export_github_step_summary
 from .mcp_server import BlackboxMCPServer
 
@@ -51,6 +52,7 @@ __all__ = [
     "CausalVerifier",
     "PatchValidator",
     "StateDiffer",
+    "PromptSynthesizer",
     "export_github_step_summary",
     "BlackboxMCPServer"
 ]

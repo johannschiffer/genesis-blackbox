@@ -49,6 +49,34 @@ class PolyglotParser:
             "defined_symbols": sorted(list(self.defined_symbols))
         }
 
+    def validate_syntax(self, code_str: str) -> None:
+        """
+        Validates structural syntax of TypeScript / JavaScript source code.
+        Verifies balanced brackets, parentheses, braces, and closed string/template literals.
+        Raises SyntaxError if structural syntax is invalid.
+        """
+        cleaned, line_offsets = self._strip_comments_and_strings(code_str)
+        # Check bracket/brace/parenthesis nesting
+        stack: List[Tuple[str, int]] = []
+        matching = {")": "(", "}": "{", "]": "["}
+        for idx, char in enumerate(cleaned):
+            if char in "({[":
+                lineno = self._offset_to_lineno(idx, line_offsets)
+                stack.append((char, lineno))
+            elif char in ")}]":
+                lineno = self._offset_to_lineno(idx, line_offsets)
+                if not stack:
+                    raise SyntaxError(f"Unexpected closing '{char}' at line {lineno}")
+                top, top_line = stack.pop()
+                if matching[char] != top:
+                    raise SyntaxError(f"Mismatched closing '{char}' at line {lineno}, expected matching '{top}' opened at line {top_line}")
+        if stack:
+            top, top_line = stack[-1]
+            raise SyntaxError(f"Unclosed '{top}' opened at line {top_line}")
+
+        # Parse symbols and structure
+        self.parse(code_str)
+
     def _strip_comments_and_strings(self, code: str) -> Tuple[str, List[int]]:
         """
         Replaces comment characters and string contents with whitespace,
@@ -164,6 +192,15 @@ class PolyglotParser:
                 i += 1
             else:
                 i += 1
+
+        if in_single_quote:
+            raise SyntaxError("Unclosed single-quote string literal")
+        if in_double_quote:
+            raise SyntaxError("Unclosed double-quote string literal")
+        if in_template_literal:
+            raise SyntaxError("Unclosed template literal")
+        if in_block_comment:
+            raise SyntaxError("Unclosed block comment")
 
         return "".join(chars), line_offsets
 

@@ -271,6 +271,19 @@ class ImpactTestSelector:
         if js_tests and not py_tests:
             cmd = ["node", "--test"] + js_tests
             return subprocess.run(cmd, cwd=self.root_dir, capture_output=True, text=True)
+        elif py_tests and not js_tests:
+            cmd = [sys.executable, "-m", "pytest"] + py_tests + ["-v"]
+            return subprocess.run(cmd, cwd=self.root_dir, capture_output=True, text=True)
+        elif py_tests and js_tests:
+            py_res = subprocess.run([sys.executable, "-m", "pytest"] + py_tests + ["-v"], cwd=self.root_dir, capture_output=True, text=True)
+            js_res = subprocess.run(["node", "--test"] + js_tests, cwd=self.root_dir, capture_output=True, text=True)
+            combined_code = py_res.returncode if py_res.returncode != 0 else js_res.returncode
+            return subprocess.CompletedProcess(
+                args=["pytest", "node --test"],
+                returncode=combined_code,
+                stdout=f"Pytest:\n{py_res.stdout}\nNode:\n{js_res.stdout}",
+                stderr=f"Pytest:\n{py_res.stderr}\nNode:\n{js_res.stderr}"
+            )
 
-        cmd = [sys.executable, "-m", "pytest"] + (py_tests or test_nodes) + ["-v"]
+        cmd = [sys.executable, "-m", "pytest"] + test_nodes + ["-v"]
         return subprocess.run(cmd, cwd=self.root_dir, capture_output=True, text=True)

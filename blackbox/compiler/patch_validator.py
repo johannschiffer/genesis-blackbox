@@ -11,6 +11,7 @@ import subprocess
 from typing import Dict, Any, List, Set, Optional
 
 from ..ast_engine.impact import ImpactTestSelector
+from ..ast_engine.polyglot import PolyglotParser
 
 
 class PatchValidator:
@@ -114,15 +115,39 @@ class PatchValidator:
         output_messages: List[str] = []
 
         try:
-            # Step 3: Validate AST syntax of modified Python files
+            # Step 3: Validate AST syntax of modified Python, JS, and TS files
             for file_path in touched_files:
-                if file_path.endswith(".py") and os.path.isfile(file_path):
+                if not os.path.isfile(file_path):
+                    continue
+                if file_path.endswith(".py"):
                     try:
                         with open(file_path, "r", encoding="utf-8") as f:
                             ast.parse(f.read(), filename=file_path)
                     except SyntaxError as syn_err:
                         syntax_valid = False
                         output_messages.append(f"SyntaxError in {file_path}:{syn_err.lineno}: {syn_err.msg}")
+                        break
+                elif any(file_path.endswith(ext) for ext in [".js", ".mjs", ".cjs"]):
+                    res = subprocess.run(
+                        ["node", "--check", file_path],
+                        cwd=self.repo_root,
+                        capture_output=True,
+                        text=True,
+                        timeout=10
+                    )
+                    if res.returncode != 0:
+                        syntax_valid = False
+                        output_messages.append(f"Node syntax check failed for {file_path}:\n{res.stderr.strip() or res.stdout.strip()}")
+                        break
+                elif any(file_path.endswith(ext) for ext in [".ts", ".tsx", ".jsx"]):
+                    try:
+                        with open(file_path, "r", encoding="utf-8") as f:
+                            content = f.read()
+                        parser = PolyglotParser(file_path=file_path)
+                        parser.validate_syntax(content)
+                    except SyntaxError as syn_err:
+                        syntax_valid = False
+                        output_messages.append(f"TypeScript/JSX syntax error in {file_path}: {syn_err}")
                         break
 
             if not syntax_valid:
@@ -135,11 +160,29 @@ class PatchValidator:
                 }
 
             # Step 4: Execute reproduction test if provided or present
-            target_test = test_path or "test_blackbox_reproduce.py"
+            target_test = test_path
+            if not target_test:
+                for cand in [
+                    "test_blackbox_reproduce.mjs",
+                    "test_blackbox_reproduce.test.ts",
+                    "test_blackbox_reproduce.test.js",
+                    "test_blackbox_reproduce.js",
+                    "test_blackbox_reproduce.py"
+                ]:
+                    if os.path.exists(os.path.join(self.repo_root, cand)):
+                        target_test = cand
+                        break
+            if not target_test:
+                target_test = "test_blackbox_reproduce.py"
+
             test_full_path = os.path.normpath(os.path.join(self.repo_root, target_test))
 
             if os.path.exists(test_full_path):
-                repro_cmd = [sys.executable, "-m", "pytest", test_full_path, "-v"]
+                if any(test_full_path.endswith(ext) for ext in [".mjs", ".cjs", ".js", ".ts", ".tsx"]):
+                    repro_cmd = ["node", "--test", test_full_path]
+                else:
+                    repro_cmd = [sys.executable, "-m", "pytest", test_full_path, "-v"]
+
                 repro_res = subprocess.run(
                     repro_cmd,
                     cwd=self.repo_root,
@@ -187,6 +230,13 @@ class PatchValidator:
                             os.makedirs(os.path.dirname(fp) or ".", exist_ok=True)
                             with open(fp, "wb") as f_restore:
                                 f_restore.write(orig_bytes)
+                    except Exception:
+                        pass
+            # Always ensure newly created files are cleaned up if reverse missed them
+            for fp, orig_bytes in pre_patch_snapshots.items():
+                if orig_bytes is None and os.path.exists(fp):
+                    try:
+                        os.remove(fp)
                     except Exception:
                         pass
 
