@@ -1,18 +1,26 @@
-# Genesis Blackbox Protocol for Claude
+# Genesis Blackbox v0.2.0 Protocol for Claude
 
-When diagnosing runtime errors or investigating regressions in this project, use the native Genesis Blackbox MCP tools:
+When diagnosing runtime errors, investigating regressions, or repairing crashes in this project, follow the mandatory Genesis Blackbox v0.2.0 autonomous repair loop using native MCP tools or CLI commands:
 
 ## Available MCP Tools
+
 - `get_crash_autopsy`: Compiles `.blackbox.md` deterministic autopsy from the circular SQLite WAL log.
-- `generate_reproduction_test`: Generates a standalone Python reproduction test (`test_blackbox_reproduce.py`) with reconstructed frame variables and mock patches.
-- `test_candidate_patch`: Evaluates a unified `git diff` against the reproduction test and AST-impacted tests with automatic rollback.
-- `verify_crash_resolution`: Runs the reproduction test and emits `.blackbox-resolved.md` once resolved.
-- `get_blast_radius`: Analyzes upstream callers and downstream dependencies for modified symbols.
+- `compare_execution_runs`: Compares baseline healthy execution run against latest failing run, pinpointing exact SQL, HTTP schema, and variable divergence.
+- `get_blast_radius`: Analyzes upstream callers and downstream dependencies for modified symbols in Python (`.py`) and TypeScript/JavaScript (`.ts`, `.tsx`, `.js`).
+- `generate_reproduction_test`: Synthesizes a standalone reproduction test (`test_blackbox_reproduce.py` with pytest or `test_blackbox_reproduce.mjs` with `node:test`).
+- `get_repair_prompt`: Compiles a complete, context-dense repair prompt packet for autonomous agents.
+- `test_candidate_patch`: Evaluates candidate `git diff` patches temporarily against reproduction and AST-impacted tests with guaranteed rollback.
+- `verify_crash_resolution`: Runs the reproduction test and emits `.blackbox-resolved.md` verification receipt.
+- `create_crash_bundle`: Snapshots active WAL and packages an incident archive (`.zip`) with SHA-256 verification manifest.
+- `inspect_crash_bundle`: Verifies integrity of a shareable crash bundle without extracting to disk.
 - `query_execution_timeline`: Inspects the sequence of HTTP requests, SQL queries, and subprocess invocations leading to the crash.
 - `record_event`: Records custom diagnostic checkpoints into the circular WAL log.
 
-## Mandatory Execution Protocol
-1. Call `get_crash_autopsy` to inspect root-cause frame variables and preceding execution timeline.
-2. Call `generate_reproduction_test` to synthesize the standalone reproduction test and verify that it reproduces the recorded failure before editing application code.
-3. Validate candidate fixes with `test_candidate_patch` within the function's AST blast radius.
-4. Confirm resolution via `verify_crash_resolution` before reporting completion.
+## Mandatory Autonomous Loop
+
+1. **Autopsy & Time-Travel Diff:** Call `get_crash_autopsy` and `compare_execution_runs` to locate the failure origin and sequence divergence.
+2. **Blast-Radius Assessment:** Call `get_blast_radius` on target files to identify upstream and downstream callers across Python and Node.js/TypeScript code.
+3. **Reproduction Before Edits:** Call `generate_reproduction_test` to synthesize the reproduction script (`.py` or `.mjs`) and verify it fails with the expected error.
+4. **Repair Synthesis:** Use `get_repair_prompt` to review the synthesized diagnostic context.
+5. **Candidate Patch Validation:** Test proposed fixes using `test_candidate_patch` to ensure syntax validity, reproduction pass, and zero regressions in impacted tests.
+6. **Resolution Verification:** Run `verify_crash_resolution` to emit `.blackbox-resolved.md` receipt confirming clean resolution.

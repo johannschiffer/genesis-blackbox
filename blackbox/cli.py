@@ -112,6 +112,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     pack_parser.add_argument("--output", default=None, help="Output prompt markdown file (default: stdout)")
     pack_parser.add_argument("--root", default=".", help="Project root directory (default: .)")
 
+    # Subcommand: bundle
+    bundle_parser = subparsers.add_parser("bundle", help="Package or inspect self-contained portable crash incident archives")
+    bundle_subparsers = bundle_parser.add_subparsers(dest="bundle_subcommand", required=True)
+
+    # Subcommand: bundle create
+    bundle_create_parser = bundle_subparsers.add_parser("create", help="Create shareable .zip crash incident bundle")
+    bundle_create_parser.add_argument("--output", default="crash_bundle.zip", help="Destination zip path (default: crash_bundle.zip)")
+    bundle_create_parser.add_argument("--db", default=".blackbox/wal.sqlite", help="Path to WAL database (default: .blackbox/wal.sqlite)")
+
+    # Subcommand: bundle inspect
+    bundle_inspect_parser = bundle_subparsers.add_parser("inspect", help="Inspect and verify integrity of crash bundle archive")
+    bundle_inspect_parser.add_argument("zip_path", help="Path to crash bundle .zip file")
+    bundle_inspect_parser.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+
     args = parser.parse_args(argv)
 
 
@@ -338,6 +352,42 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0
         finally:
             ring.close()
+
+    elif args.command == "bundle":
+        from .recorder.bundle import CrashBundler
+        bundler = CrashBundler(db_path=getattr(args, "db", ".blackbox/wal.sqlite"), repo_root=".")
+        if args.bundle_subcommand == "create":
+            res = bundler.create_bundle(output_zip=args.output, db_path=args.db)
+            print(f"[Genesis-Blackbox] Portable crash bundle created: {res['bundle_path']}")
+            print(f"Total files bundled: {len(res['files'])} (SHA-256 verified manifest included)")
+            print(f"Size: {res['size_bytes']} bytes")
+            return 0
+        elif args.bundle_subcommand == "inspect":
+            res = bundler.inspect_bundle(zip_path=args.zip_path)
+            if args.json:
+                print(json.dumps(res, indent=2))
+            else:
+                if res["valid"]:
+                    print(f"[Genesis-Blackbox] Bundle Integrity: VALID (All SHA-256 checksums verified)")
+                    manifest = res.get("manifest") or {}
+                    print(f"- Created At: {manifest.get('created_at')}")
+                    print(f"- OS: {manifest.get('os', {}).get('system')} {manifest.get('os', {}).get('release')}")
+                    print(f"- Python: {manifest.get('python_version', '').split()[0]}")
+                    if manifest.get('node_version'):
+                        print(f"- Node: {manifest.get('node_version')}")
+                    git_info = manifest.get('git', {})
+                    if git_info.get('commit'):
+                        print(f"- Git: {git_info.get('branch')} ({git_info.get('commit')[:8]})")
+                    wal_stats = manifest.get('wal_stats', {})
+                    print(f"- WAL Events: {wal_stats.get('total_events')} total")
+                    print(f"- Bundled Files ({len(res.get('files', []))}): {', '.join(res.get('files', []))}")
+                else:
+                    print(f"[Genesis-Blackbox] Bundle Integrity: CORRUPTED / INVALID", file=sys.stderr)
+                    if res.get("error"):
+                        print(f"Error: {res['error']}", file=sys.stderr)
+                    for c in res.get("corrupted_files", []):
+                        print(f"- Corrupted: {c.get('file')} ({c.get('error')})", file=sys.stderr)
+            return 0 if res["valid"] else 1
 
     return 0
 

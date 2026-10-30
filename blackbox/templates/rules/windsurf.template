@@ -1,9 +1,23 @@
-# Genesis Blackbox Integration Directives for Windsurf / Cascade
+# Genesis Blackbox v0.2.0 Integration Directives for Windsurf / Cascade
 
-When resolving runtime exceptions, follow the Genesis Blackbox workflow:
+When resolving runtime exceptions or investigating regressions, execute the complete Genesis Blackbox v0.2.0 autonomous workflow:
 
-1. Consult `.blackbox.md` or execute `blackbox autopsy` to inspect deterministic frame states and execution timelines.
-2. Run `blackbox reproduce` to synthesize the reproduction script `test_blackbox_reproduce.py`.
-3. Confirm reproduction with `pytest test_blackbox_reproduce.py`.
-4. Perform the fix strictly inside the AST blast radius.
-5. Verify fix by ensuring `pytest test_blackbox_reproduce.py` exits 0.
+1. **Autopsy & Time-Travel Diff:**
+   - Execute `blackbox autopsy` (or MCP `get_crash_autopsy`) to inspect root-cause frames, local variables, and timeline.
+   - Execute `blackbox diff-runs` (or MCP `compare_execution_runs`) to identify divergence between healthy and failing runs.
+
+2. **Polyglot Blast-Radius Analysis:**
+   - Run `blackbox blast-radius <file>` (or MCP `get_blast_radius`) to assess dependencies across Python (`.py`) and TypeScript/JavaScript (`.ts`, `.tsx`, `.js`).
+
+3. **Deterministic Reproduction:**
+   - Run `blackbox reproduce` (or MCP `generate_reproduction_test`).
+   - Run the generated test (`pytest test_blackbox_reproduce.py` for Python or `node --test test_blackbox_reproduce.mjs` for Node/TS) and confirm failure before editing source code.
+
+4. **Repair Context & Packaging:**
+   - Run `blackbox pack` (or MCP `get_repair_prompt`) to synthesize complete diagnostic context.
+
+5. **Patch Validation & Regression Impact:**
+   - Validate proposed fixes via MCP tool `test_candidate_patch` or `blackbox test-impact --diff --run`.
+
+6. **Resolution Verification Receipt:**
+   - Run `blackbox verify` (or MCP `verify_crash_resolution`) to generate `.blackbox-resolved.md` proving the crash is fixed.

@@ -242,6 +242,46 @@ class BlackboxMCPServer:
                     db_path=args.get("db_path", self.default_db_path),
                     repo_root=args.get("repo_root", ".")
                 )
+            },
+            "create_crash_bundle": {
+                "name": "create_crash_bundle",
+                "description": "Snapshots active WAL database and packages an incident archive (.zip) with autopsy, diff, reproducer test, and SHA-256 system manifest.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "output_zip": {
+                            "type": "string",
+                            "description": "Path to output zip archive (default: crash_bundle.zip)",
+                            "default": "crash_bundle.zip"
+                        },
+                        "db_path": {
+                            "type": "string",
+                            "description": "Path to WAL SQLite database (default: .blackbox/wal.sqlite)",
+                            "default": ".blackbox/wal.sqlite"
+                        }
+                    }
+                },
+                "handler": lambda args: self.create_crash_bundle(
+                    output_zip=args.get("output_zip", "crash_bundle.zip"),
+                    db_path=args.get("db_path", self.default_db_path)
+                )
+            },
+            "inspect_crash_bundle": {
+                "name": "inspect_crash_bundle",
+                "description": "Inspects a shareable crash incident archive (.zip) and verifies SHA-256 member checksum integrity without extraction.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "zip_path": {
+                            "type": "string",
+                            "description": "Path to crash bundle .zip file"
+                        }
+                    },
+                    "required": ["zip_path"]
+                },
+                "handler": lambda args: self.inspect_crash_bundle(
+                    zip_path=args["zip_path"]
+                )
             }
         }
         self.tools["blackbox_get_crash_autopsy"] = self.tools["get_crash_autopsy"]
@@ -253,6 +293,8 @@ class BlackboxMCPServer:
         self.tools["blackbox_test_candidate_patch"] = self.tools["test_candidate_patch"]
         self.tools["blackbox_compare_execution_runs"] = self.tools["compare_execution_runs"]
         self.tools["blackbox_get_repair_prompt"] = self.tools["get_repair_prompt"]
+        self.tools["blackbox_create_crash_bundle"] = self.tools["create_crash_bundle"]
+        self.tools["blackbox_inspect_crash_bundle"] = self.tools["inspect_crash_bundle"]
 
     def generate_reproduction_test(self, db_path: str = ".blackbox/wal.sqlite") -> str:
         """Synthesizes and returns standalone Python reproduction test script from WAL database."""
@@ -310,6 +352,25 @@ class BlackboxMCPServer:
         with self._resolve_ring(db_path) as ring:
             synth = PromptSynthesizer(wal_ring=ring, repo_root=repo_root, db_path=db_path)
             return synth.synthesize()
+
+    def create_crash_bundle(
+        self,
+        output_zip: str = "crash_bundle.zip",
+        db_path: str = ".blackbox/wal.sqlite"
+    ) -> Dict[str, Any]:
+        """Creates a portable incident zip bundle."""
+        from .recorder.bundle import CrashBundler
+        bundler = CrashBundler(db_path=db_path, repo_root=".")
+        return bundler.create_bundle(output_zip=output_zip, db_path=db_path)
+
+    def inspect_crash_bundle(
+        self,
+        zip_path: str
+    ) -> Dict[str, Any]:
+        """Inspects and verifies the integrity of an incident zip bundle."""
+        from .recorder.bundle import CrashBundler
+        bundler = CrashBundler()
+        return bundler.inspect_bundle(zip_path=zip_path)
 
     def get_crash_autopsy(self, db_path: str = ".blackbox/wal.sqlite") -> str:
         """Compiles and returns .blackbox.md autopsy markdown from WAL database."""

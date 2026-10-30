@@ -1,25 +1,31 @@
-# Genesis Blackbox Integration Directives for Cursor Agent
+# Genesis Blackbox v0.2.0 Integration Directives for Cursor Agent
 
 You are working in a repository equipped with Genesis Blackbox runtime flight recording.
-Follow this mandatory debug protocol whenever resolving any runtime exception, test failure, or bug:
+Follow this mandatory v0.2.0 autonomous debug and repair protocol whenever resolving any runtime exception, test failure, or bug:
 
-## 1. Zero Guessing & Hallucination Gate
-- Never invent hypothetical root causes when a crash occurs.
-- Immediately consult `.blackbox.md` (or run `blackbox autopsy`) to inspect:
-  1. The deterministic root-cause stack frame.
-  2. Local variable bindings captured at crash time.
-  3. Preceding HTTP, SQL, and subprocess execution timelines.
-  4. AST blast radius indicating upstream callers and downstream callees.
+## Mandatory Autonomous Debug Loop (Zero Guessing Gate)
 
-## 2. Deterministic Reproduction Before Code Edits
-- Run `blackbox reproduce --output test_blackbox_reproduce.py` to generate the standalone reproduction test.
-- Execute `pytest test_blackbox_reproduce.py` to confirm the reproduction test reproduces the exact recorded failure.
-- Do NOT touch application source code until the reproduction test fails with the expected exception.
+1. **Step 1: Autopsy & Time-Travel Diff**
+   - Run `blackbox autopsy` (or MCP tool `get_crash_autopsy`) to inspect the deterministic root-cause frame, local variables, and execution timeline.
+   - Run `blackbox diff-runs` (or MCP tool `compare_execution_runs`) to pinpoint divergence (SQL query shift, HTTP schema drift, or variable mutation) between healthy baseline runs and the crashing run.
 
-## 3. Scoped Blast-Radius Implementation
-- Confine all code changes strictly within the impacted function and its AST blast radius.
-- Do not introduce unrelated refactorings or suppress exceptions with blanket try/except blocks.
+2. **Step 2: AST Blast-Radius Analysis (Polyglot: Python & TypeScript/JavaScript)**
+   - Run `blackbox blast-radius <file> [--symbol <func>]` (or MCP tool `get_blast_radius`) across both Python (`.py`) and Node/TypeScript (`.ts`, `.tsx`, `.js`) modules.
+   - Inspect upstream callers and downstream callees before planning changes.
 
-## 4. Verification Gate
-- Re-run `pytest test_blackbox_reproduce.py`.
-- The task is complete ONLY when the reproduction test passes 100% and existing project test suites remain green.
+3. **Step 3: Standalone Reproduction Synthesis**
+   - Run `blackbox reproduce` (or MCP tool `generate_reproduction_test`).
+   - If Python: executes `pytest test_blackbox_reproduce.py`.
+   - If Node.js / TypeScript: executes `node --test test_blackbox_reproduce.mjs`.
+   - Verify failure reproduction before editing any source code. Zero guessing.
+
+4. **Step 4: AI Repair Prompt Packet**
+   - Run `blackbox pack` (or MCP tool `get_repair_prompt`) to generate an all-in-one repair prompt context containing the autopsy, reproducer, blast radius, and time-travel divergence.
+
+5. **Step 5: Candidate Patch Validation with Guaranteed Rollback**
+   - Before committing changes, test candidate diffs via MCP tool `test_candidate_patch`.
+   - Validates syntax (`ast.parse` for Python, `node --check` / `PolyglotParser` for JS/TS) and verifies that reproduction test passes with zero regressions on impacted tests.
+
+6. **Step 6: Resolution Verification & Receipt**
+   - Run `blackbox verify` (or MCP tool `verify_crash_resolution`).
+   - Generates `.blackbox-resolved.md` proving the crash is fixed without secondary breakage.

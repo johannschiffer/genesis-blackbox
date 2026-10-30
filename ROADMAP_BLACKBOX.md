@@ -100,13 +100,26 @@ When an autonomous agent attempts to fix a production failure:
 
 ### Phase 4: Local Time-Travel UI & Model Context Protocol (MCP) Interface
 - **`blackbox/mcp_server.py`**:
-  - Exposes tools to Claude Desktop, Cursor, and Antigravity:
-    - `blackbox_record_event`
-    - `blackbox_get_autopsy`
-    - `blackbox_get_blast_radius`
-    - `blackbox_query_timeline`
+  - Exposes diagnostic and repair tools to AI coding agents.
 - **`blackbox/ui/`**:
   - Zero-dependency local web dashboard for scrubbing execution timelines.
+
+### Phase 5: v0.2.0 Expansion & Polyglot Capabilities (Completed)
+- **Polyglot AST Engine & Node/TS Interceptor (`ast_engine/polyglot.py`, `recorder/node_preload.py`)**:
+  - Pure-Python structural parser for `.ts`, `.tsx`, `.js`, and `.jsx` extracting imports, exports, functions, and Next.js route boundaries.
+  - Active Node.js runtime preload hook wrapping `fetch`, `http.request`, `uncaughtException`, and `unhandledRejection` with secret sanitization.
+- **Time-Travel Execution Differ (`compiler/state_differ.py`)**:
+  - Differential engine comparing passing baseline executions against failing runs to pinpoint SQL, HTTP, and variable divergence.
+- **Polyglot Crash Reproducer & Causal Verifier (`compiler/reproducer.py`, `compiler/verifier.py`)**:
+  - Generates standalone `pytest` reproduction tests for Python and `node:test` tests (`.mjs`) for Node/TS crashes.
+- **Polyglot Patch Validator (`compiler/patch_validator.py`)**:
+  - Evaluates candidate unified diffs with `node --check` and `PolyglotParser`, running reproduction tests with 100% rollback guarantee.
+- **AI Repair Prompt Synthesizer (`compiler/prompt_synth.py`)**:
+  - Compiles full prompt packets with code fences, autopsy, reproducer, blast radius, and differ via CLI `blackbox pack` and MCP `get_repair_prompt`.
+- **Portable Crash Bundler (`recorder/bundle.py`)**:
+  - Snapshots WAL via SQLite Online Backup API and generates self-contained `.zip` archives with SHA-256 integrity verification (`blackbox bundle create/inspect`).
+- **Live SSE Streaming (`ui/server.py`)**:
+  - High-performance `GET /api/live` Server-Sent Events endpoint streaming real-time WAL events to the embedded visualizer.
 
 ---
 

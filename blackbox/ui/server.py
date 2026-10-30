@@ -709,8 +709,39 @@ EMBEDDED_HTML = """<!DOCTYPE html>
       fetchDiff();
     }
 
+    function initLiveStream() {
+      const badge = document.getElementById('conn-badge');
+      try {
+        const es = new EventSource('/api/live');
+        es.onopen = function() {
+          if (badge) {
+            badge.textContent = '● LIVE';
+            badge.style.background = 'var(--ok-bg)';
+            badge.style.color = 'var(--ok-text)';
+            badge.style.borderColor = 'var(--ok-border)';
+          }
+        };
+        es.onmessage = function(e) {
+          try {
+            const data = JSON.parse(e.data);
+            if (data && data.type !== 'connected') {
+              refreshAll();
+            }
+          } catch (_) {}
+        };
+        es.onerror = function() {
+          if (badge) {
+            badge.textContent = '○ Polling';
+          }
+        };
+      } catch (_) {
+        if (badge) badge.textContent = '○ Polling';
+      }
+    }
+
     refreshAll();
-    setInterval(refreshAll, 3000);
+    initLiveStream();
+    setInterval(refreshAll, 5000);
   </script>
 </body>
 </html>
@@ -752,6 +783,8 @@ class BlackboxUIRequestHandler(BaseHTTPRequestHandler):
             self._handle_api_blast_radius(query)
         elif path == "/api/diff-runs":
             self._handle_api_diff_runs(query)
+        elif path == "/api/live":
+            self._handle_api_live(query)
         elif path == "/api/status":
             self._handle_api_status()
         else:
@@ -850,6 +883,77 @@ class BlackboxUIRequestHandler(BaseHTTPRequestHandler):
             self._send_json(diff_res)
         except Exception as e:
             self._send_json({"error": str(e)}, status=400)
+
+    def _handle_api_live(self, query):
+        """
+        Streams new WAL events over Server-Sent Events (text/event-stream).
+        Supports:
+        - ?last_id=<int>: start streaming events after this ID
+        - ?once=1: send initial snapshot/events/heartbeat and terminate immediately (for deterministic testing)
+        - keep-alive: periodic keep-alive comments
+        """
+        once = query.get("once", ["0"])[0] == "1"
+        last_id = 0
+        if "last_id" in query:
+            try:
+                last_id = int(query["last_id"][0])
+            except ValueError:
+                last_id = 0
+        else:
+            recent = self.wal_ring.query_recent(limit=1)
+            if recent:
+                last_id = recent[0].get("id", 0)
+
+        init_frame = f": connected\n\ndata: {json.dumps({'type': 'connected', 'last_id': last_id})}\n\n"
+        init_frame_bytes = init_frame.encode("utf-8")
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-transform")
+        if once:
+            self.send_header("Connection", "close")
+            self.send_header("Content-Length", str(len(init_frame_bytes)))
+        else:
+            self.send_header("Connection", "keep-alive")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        origin = self.headers.get("Origin", "")
+        if origin:
+            parsed_origin = urllib.parse.urlparse(origin)
+            if parsed_origin.hostname in ("127.0.0.1", "localhost", "::1"):
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Vary", "Origin")
+        else:
+            self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+        self.wfile.write(init_frame_bytes)
+        self.wfile.flush()
+
+        if once:
+            self.close_connection = True
+            return
+
+        import time
+        try:
+            while True:
+                recent = self.wal_ring.query_recent(limit=50)
+                new_events = [e for e in recent if e.get("id", 0) > last_id]
+                new_events.sort(key=lambda x: x.get("id", 0))
+
+                for ev in new_events:
+                    last_id = max(last_id, ev.get("id", 0))
+                    payload_line = f"data: {json.dumps(ev, default=str)}\n\n"
+                    self.wfile.write(payload_line.encode("utf-8"))
+
+                if new_events:
+                    self.wfile.flush()
+                else:
+                    self.wfile.write(b": keep-alive\n\n")
+                    self.wfile.flush()
+
+                time.sleep(0.5)
+        except (BrokenPipeError, ConnectionResetError, IOError):
+            pass
 
     def _handle_api_status(self):
         resp_data = {
