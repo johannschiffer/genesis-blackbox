@@ -33,6 +33,10 @@ class BlackboxMCPServer:
         self.version = __version__
         self._init_tools()
 
+    def close(self) -> None:
+        """Releases the default WAL connection."""
+        self.wal_ring.close()
+
     @contextmanager
     def _resolve_ring(self, db_path: Optional[str]):
         target = db_path or self.default_db_path
@@ -175,15 +179,14 @@ class BlackboxMCPServer:
                         },
                         "test_path": {
                             "type": "string",
-                            "description": "Path to reproduction test file (default: test_blackbox_reproduce.py)",
-                            "default": "test_blackbox_reproduce.py"
+                            "description": "Path to reproduction test file inside the repo (default: auto-detect test_blackbox_reproduce.mjs/.py)"
                         }
                     },
                     "required": ["patch_diff"]
                 },
                 "handler": lambda args: self.test_candidate_patch(
                     patch_diff=args["patch_diff"],
-                    test_path=args.get("test_path", "test_blackbox_reproduce.py")
+                    test_path=args.get("test_path")
                 )
             },
             "compare_execution_runs": {
@@ -320,7 +323,7 @@ class BlackboxMCPServer:
     def test_candidate_patch(
         self,
         patch_diff: str,
-        test_path: str = "test_blackbox_reproduce.py"
+        test_path: Optional[str] = None
     ) -> Dict[str, Any]:
         """Validates a candidate patch diff in an isolated environment with guaranteed rollback."""
         validator = PatchValidator(repo_root=".", db_path=self.default_db_path)
@@ -456,7 +459,11 @@ class BlackboxMCPServer:
                 "test_candidate_patch",
                 "get_blast_radius",
                 "query_execution_timeline",
-                "record_event"
+                "record_event",
+                "compare_execution_runs",
+                "get_repair_prompt",
+                "create_crash_bundle",
+                "inspect_crash_bundle"
             ]
 
             tool_list = [
@@ -475,7 +482,7 @@ class BlackboxMCPServer:
             if name in self.tools:
                 try:
                     res = self.tools[name]["handler"](args)
-                    text_content = res if isinstance(res, str) else json.dumps(res, indent=2)
+                    text_content = res if isinstance(res, str) else json.dumps(res, indent=2, default=str)
                     return {
                         "jsonrpc": "2.0",
                         "id": req_id,
@@ -543,7 +550,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     args = parser.parse_args(argv)
     server = BlackboxMCPServer(db_path=args.db)
-    server.run_stdio()
+    try:
+        server.run_stdio()
+    finally:
+        server.close()
     return 0
 
 

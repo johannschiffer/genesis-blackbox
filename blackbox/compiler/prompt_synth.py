@@ -18,6 +18,11 @@ from .reproducer import CrashReproducer
 from .state_differ import StateDiffer
 
 
+_SKIP_DIRS = frozenset({
+    ".git", "node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", "dist", "build"
+})
+
+
 class PromptSynthesizer:
     """
     Synthesizes complete, context-dense repair prompt packets for AI coding agents.
@@ -33,9 +38,21 @@ class PromptSynthesizer:
     ):
         self.repo_root = os.path.abspath(repo_root)
         self.db_path = db_path
+        self._owns_ring = wal_ring is None
         self.wal_ring = wal_ring or WalRingBuffer(db_path=self.db_path)
         self.ast_graph = ast_graph or CodebaseGraph()
         self.impact_selector = ImpactTestSelector(root_dir=self.repo_root, graph=self.ast_graph)
+
+    def close(self) -> None:
+        """Closes the WAL ring only if this synthesizer opened it."""
+        if self._owns_ring:
+            self.wal_ring.close()
+
+    def __enter__(self) -> "PromptSynthesizer":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
 
     def synthesize(self) -> str:
         """Generates full markdown repair prompt packet for the latest crash in WAL."""
@@ -160,27 +177,37 @@ class PromptSynthesizer:
                 # Use PolyglotParser
                 with open(filename, "r", encoding="utf-8", errors="replace") as f:
                     p_res = PolyglotParser(file_path=filename).parse(f.read())
-                func_data = p_res["functions"].get(func_name, {})
-                downstream_callees = func_data.get("calls", [])
+                # V8 names methods Class.method; the parser indexes the bare name.
+                short_name = func_name.split(".")[-1] if func_name else ""
+                func_data = p_res["functions"].get(func_name) or p_res["functions"].get(short_name) or {}
+                downstream_callees = list(func_data.get("calls", []))
+
+                if short_name:
+                    for fn_name, fn_info in p_res["functions"].items():
+                        if fn_name != short_name and short_name in fn_info.get("calls", []):
+                            upstream_callers.append(f"{os.path.basename(filename)}:{fn_name}()")
 
                 # Search codebase for callers
-                for root, _, files in os.walk(self.repo_root):
-                    if any(x in root for x in [".git", "node_modules", ".venv", "__pycache__"]):
-                        continue
+                for root, dirs, files in os.walk(self.repo_root):
+                    # Prune in place so os.walk never descends into vendored or build trees.
+                    dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
                     for fl in files:
-                        if fl.endswith((".js", ".jsx", ".ts", ".tsx", ".mjs")):
+                        if fl.endswith((".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")):
                             fpath = os.path.join(root, fl)
-                            if os.path.normpath(fpath) == os.path.normpath(filename):
+                            if os.path.normpath(fpath) == os.path.normpath(os.path.abspath(filename)):
                                 continue
                             try:
                                 with open(fpath, "r", encoding="utf-8", errors="replace") as f_other:
                                     other_res = PolyglotParser(file_path=fpath).parse(f_other.read())
                                 for fn_name, fn_info in other_res["functions"].items():
-                                    if func_name and func_name in fn_info.get("calls", []):
+                                    if short_name and short_name in fn_info.get("calls", []):
                                         upstream_callers.append(f"{fl}:{fn_name}()")
                             except Exception:
                                 pass
             else:
+                # A single-file graph cannot see callers in other modules.
+                if len(self.ast_graph.nodes) <= 1:
+                    self.ast_graph.parse_directory(self.repo_root, max_files=100)
                 self.ast_graph.parse_file(filename)
                 if func_name:
                     radius = self.ast_graph.get_blast_radius(func_name, file_path=filename)

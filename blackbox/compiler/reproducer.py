@@ -7,9 +7,18 @@ captured stack frames, local variables, and preceding flight recorder events.
 import os
 import sys
 import json
+import math
 import inspect
 from typing import Dict, Any, List, Optional
 from ..recorder.wal_ring import WalRingBuffer
+
+
+def _doc_safe(text: Any, closer: str) -> str:
+    """Flattens text to one line and neutralizes the given comment/docstring terminator."""
+    flat = str(text).replace("\r", " ").replace("\n", " ")
+    if closer == '"""':
+        return flat.replace("\\", "\\\\").replace('"""', "'''")
+    return flat.replace(closer, "* /")
 
 
 def _safe_repr(val: Any) -> str:
@@ -18,7 +27,14 @@ def _safe_repr(val: Any) -> str:
         return "None"
     if isinstance(val, bool):
         return "True" if val else "False"
-    if isinstance(val, (int, float)):
+    if isinstance(val, float):
+        # repr() of nan/inf yields bare names that are undefined in generated code.
+        if math.isnan(val):
+            return "float('nan')"
+        if math.isinf(val):
+            return "float('inf')" if val > 0 else "float('-inf')"
+        return repr(val)
+    if isinstance(val, int):
         return str(val)
     if isinstance(val, str):
         if val in ("<depth-limit-reached>", "<circular-reference>"):
@@ -95,7 +111,7 @@ class CrashReproducer:
         locals_dict = root_cause.get("locals") or {}
 
         abs_target = os.path.abspath(culprit_file) if culprit_file else ""
-        safe_doc_msg = str(exc_msg).replace("*/", "* /").replace("\n", " ")
+        safe_doc_msg = _doc_safe(exc_msg, "*/")
         safe_target_path = abs_target.replace("\\", "/")
 
         if culprit_func in ("<anonymous>", "<module>", "anonymous", "", "None"):
@@ -129,8 +145,8 @@ class CrashReproducer:
         lines = [
             "/**",
             " * Genesis Blackbox: Deterministic Crash Reproduction Test (Node.js)",
-            f" * Target Exception: {exc_type}: {safe_doc_msg}",
-            f" * Target Culprit: {culprit_func}() in {safe_target_path}:{culprit_line}",
+            f" * Target Exception: {_doc_safe(exc_type, '*/')}: {safe_doc_msg}",
+            f" * Target Culprit: {_doc_safe(culprit_func, '*/')}() in {_doc_safe(safe_target_path, '*/')}:{culprit_line}",
             " * Generated automatically by Genesis Blackbox Causal Crash Reproducer.",
             " */",
             "",
@@ -148,9 +164,12 @@ class CrashReproducer:
             "  }",
             "  const fileUrl = pathToFileURL(TARGET_FILE).href;",
             "  const mod = await import(fileUrl);",
-            "  let fn = (TARGET_FUNCTION_NAME && !TARGET_FUNCTION_NAME.startsWith('<')) ? mod[TARGET_FUNCTION_NAME] : null;",
+            "  const validName = TARGET_FUNCTION_NAME && !TARGET_FUNCTION_NAME.startsWith('<');",
+            "  // V8 reports methods as Class.method; module exports use the bare name.",
+            "  const shortName = validName ? TARGET_FUNCTION_NAME.split('.').pop() : null;",
+            "  let fn = validName ? (mod[TARGET_FUNCTION_NAME] || mod[shortName]) : null;",
             "  if (!fn && mod.default) {",
-            "    fn = (typeof mod.default === 'object' && TARGET_FUNCTION_NAME && !TARGET_FUNCTION_NAME.startsWith('<')) ? mod.default[TARGET_FUNCTION_NAME] : mod.default;",
+            "    fn = (typeof mod.default === 'object' && validName) ? (mod.default[TARGET_FUNCTION_NAME] || mod.default[shortName]) : mod.default;",
             "  }",
             "  if (!fn && typeof mod === 'function') {",
             "    fn = mod;",
@@ -209,15 +228,17 @@ class CrashReproducer:
             if not k.startswith("__") and not k.startswith("@"):
                 clean_locals[k] = v
 
-        safe_doc_msg = str(exc_msg).replace("\\", "\\\\").replace('"""', "'''").replace("\n", " ")
-        safe_doc_file = str(culprit_file).replace("\\", "/")
+        safe_doc_msg = _doc_safe(exc_msg, '"""')
+        safe_doc_file = _doc_safe(str(culprit_file).replace("\\", "/"), '"""')
+        safe_doc_type = _doc_safe(exc_type, '"""')
+        safe_doc_func = _doc_safe(culprit_func, '"""')
         abs_target = os.path.abspath(culprit_file) if culprit_file else ""
 
         lines = [
             '"""',
             'Genesis Blackbox: Deterministic Crash Reproduction Test',
-            f'Target Exception: {exc_type}: {safe_doc_msg}',
-            f'Target Culprit: {culprit_func}() in {safe_doc_file}:{culprit_line}',
+            f'Target Exception: {safe_doc_type}: {safe_doc_msg}',
+            f'Target Culprit: {safe_doc_func}() in {safe_doc_file}:{culprit_line}',
             'Generated automatically by Genesis Blackbox Causal Crash Reproducer.',
             '"""',
             "",
@@ -256,7 +277,7 @@ class CrashReproducer:
             "",
             "def test_reproduce_and_verify_fix():",
             '    """',
-            f'    Reproduces crash scenario: {exc_type}: {safe_doc_msg}.',
+            f'    Reproduces crash scenario: {safe_doc_type}: {safe_doc_msg}.',
             '    - In UNFIXED code: Fails with the recorded exception.',
             '    - In FIXED code: Completes execution successfully.',
             '    """',
@@ -267,7 +288,7 @@ class CrashReproducer:
         ]
 
         for k, v in clean_locals.items():
-            lines.append(f'        "{k}": {_safe_repr(v)},')
+            lines.append(f'        {repr(str(k))}: {_safe_repr(v)},')
 
         lines.extend([
             "    }",

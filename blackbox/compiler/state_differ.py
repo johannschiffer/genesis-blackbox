@@ -64,7 +64,7 @@ class StateDiffer:
                         current_run_events = []
                     current_run_id = p.get("run_id") or p.get("session_id") or f"run-{run_idx}"
                     current_run_events.append(e)
-                elif etype in ("PROCESS_EXIT", "SUBPROCESS_EXIT"):
+                elif etype in ("PROCESS_EXIT", "SUBPROCESS_EXIT", "EXIT"):
                     current_run_events.append(e)
                     rid = current_run_id or p.get("run_id") or f"run-{run_idx}"
                     runs.append(self._build_run_object(rid, current_run_events))
@@ -147,7 +147,7 @@ class StateDiffer:
                 has_exception = True
             if e.get("status") == "error":
                 has_error_status = True
-            if e.get("event_type") in ("PROCESS_EXIT", "SUBPROCESS_EXIT"):
+            if e.get("event_type") in ("PROCESS_EXIT", "SUBPROCESS_EXIT", "EXIT"):
                 p = e.get("payload") if isinstance(e.get("payload"), dict) else {}
                 code = p.get("exit_code", p.get("returncode", 0))
                 if code != 0:
@@ -489,6 +489,10 @@ class StateDiffer:
                     if nested:
                         return f"Named param '{k}' -> {nested}"
 
+            for k in f_params:
+                if k not in b_params:
+                    return f"Named param '{k}' added in crashing run"
+
         return None
 
     def _diff_sql_events(
@@ -525,9 +529,14 @@ class StateDiffer:
                 if bs.get("status") == "ok" and fs.get("status") == "error":
                     diff_item["divergence"] = f"Query failed in crashing run: {fp.get('error', 'Execution Error')}"
                 else:
-                    param_shape_diff = self._diff_param_shapes(bp.get("params"), fp.get("params"))
-                    if param_shape_diff:
-                        diff_item["divergence"] = param_shape_diff
+                    b_norm = " ".join(str(bp.get("query", bp.get("sql", ""))).split())
+                    f_norm = " ".join(str(fp.get("query", fp.get("sql", ""))).split())
+                    if b_norm != f_norm:
+                        diff_item["divergence"] = "SQL query structure changed"
+                    else:
+                        param_shape_diff = self._diff_param_shapes(bp.get("params"), fp.get("params"))
+                        if param_shape_diff:
+                            diff_item["divergence"] = param_shape_diff
             elif fs and not bs:
                 diff_item["divergence"] = "New unexpected query executed in crashing run"
             elif bs and not fs:
@@ -629,6 +638,10 @@ class StateDiffer:
             "mutated_variables": mutated
         }
 
+    @staticmethod
+    def _escape_md_cell(val: Any) -> str:
+        return str(val).replace("\r", " ").replace("\n", " ").replace("|", "\\|").strip()
+
     def compile_markdown(self, diff_result: Dict[str, Any]) -> str:
         """
         Compiles .blackbox-diff.md deterministic report for AI coding agents.
@@ -682,14 +695,14 @@ class StateDiffer:
             md.append("| Step | Healthy Baseline Query | Crashing Query | Status Shift | Divergence / Param Mutation |")
             md.append("|---|---|---|---|---|")
             for sq in sql_diffs:
-                b_q = str(sq['baseline_query']).replace("\n", " ").strip()
+                b_q = self._escape_md_cell(sq['baseline_query'])
                 if len(b_q) > 40:
                     b_q = b_q[:37] + "..."
-                f_q = str(sq['failing_query']).replace("\n", " ").strip()
+                f_q = self._escape_md_cell(sq['failing_query'])
                 if len(f_q) > 40:
                     f_q = f_q[:37] + "..."
-                status_shift = f"`{sq['baseline_status']}` -> `{sq['failing_status']}`"
-                div_note = sq['divergence'] or "MATCH"
+                status_shift = f"`{self._escape_md_cell(sq['baseline_status'])}` -> `{self._escape_md_cell(sq['failing_status'])}`"
+                div_note = self._escape_md_cell(sq['divergence'] or "MATCH")
                 md.append(f"| #{sq['step']} | `{b_q}` | `{f_q}` | {status_shift} | {div_note} |")
             md.append("")
 
@@ -700,9 +713,11 @@ class StateDiffer:
             md.append("| Step | Healthy Endpoint | Crashing Endpoint | Status Code Shift | Divergence Details |")
             md.append("|---|---|---|---|---|")
             for hq in http_diffs:
-                sc_shift = f"`{hq['baseline_status']}` -> `{hq['failing_status']}`"
-                div_note = hq['divergence'] or "MATCH"
-                md.append(f"| #{hq['step']} | `{hq['baseline_endpoint']}` | `{hq['failing_endpoint']}` | {sc_shift} | {div_note} |")
+                sc_shift = f"`{self._escape_md_cell(hq['baseline_status'])}` -> `{self._escape_md_cell(hq['failing_status'])}`"
+                div_note = self._escape_md_cell(hq['divergence'] or "MATCH")
+                b_ep = self._escape_md_cell(hq['baseline_endpoint'])
+                f_ep = self._escape_md_cell(hq['failing_endpoint'])
+                md.append(f"| #{hq['step']} | `{b_ep}` | `{f_ep}` | {sc_shift} | {div_note} |")
             md.append("")
 
         # Section 4: Variable State & Exception Divergence
@@ -714,10 +729,17 @@ class StateDiffer:
             md.append("## 4. Local Variable & Exception Divergence")
             if exc:
                 md.append(f"**Uncaught Crash:** `{exc.get('type')}`: {exc.get('message')}")
-                if exc.get("culprit_file"):
-                    md.append(f"**Culprit Location:** `{exc.get('culprit_file')}:{exc.get('culprit_line')}` in `{exc.get('culprit_function')}()`")
+                culprit_file = str(exc.get("culprit_file") or "")
+                if culprit_file:
+                    md.append(f"**Culprit Location:** `{culprit_file}:{exc.get('culprit_line')}` in `{exc.get('culprit_function')}()`")
                 if exc.get("culprit_statement"):
-                    md.append(f"```python\n{exc.get('culprit_statement').strip()}\n```")
+                    if culprit_file.endswith((".ts", ".tsx")):
+                        fence = "typescript"
+                    elif culprit_file.endswith((".js", ".jsx", ".mjs", ".cjs")):
+                        fence = "javascript"
+                    else:
+                        fence = "python"
+                    md.append(f"```{fence}\n{exc.get('culprit_statement').strip()}\n```")
                 md.append("")
 
             if mutated:
@@ -725,7 +747,9 @@ class StateDiffer:
                 md.append("| Variable | Crashing Run Value | Diagnosis |")
                 md.append("|---|---|---|")
                 for vk, vv in mutated.items():
-                    md.append(f"| `{vk}` | `{vv.get('crashing_value')}` | {vv.get('issue')} |")
+                    md.append(
+                        f"| `{self._escape_md_cell(vk)}` | `{self._escape_md_cell(vv.get('crashing_value'))}` | {self._escape_md_cell(vv.get('issue'))} |"
+                    )
                 md.append("")
 
         # Section 5: Chronological Alignment Stream
@@ -736,8 +760,10 @@ class StateDiffer:
             md.append("|---|---|---|---|---|")
             for al in alignments[:25]:
                 match_badge = "✅ MATCH" if al["aligned"] else "❌ DIVERGED"
-                note = al["diff_note"] or "-"
-                md.append(f"| #{al['step']} | `{al['baseline']}` | `{al['failing']}` | {match_badge} | {note} |")
+                note = self._escape_md_cell(al["diff_note"] or "-")
+                b_cell = self._escape_md_cell(al['baseline'])
+                f_cell = self._escape_md_cell(al['failing'])
+                md.append(f"| #{al['step']} | `{b_cell}` | `{f_cell}` | {match_badge} | {note} |")
             md.append("")
 
         # Section 6: Actionable Mandate

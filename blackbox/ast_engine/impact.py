@@ -123,8 +123,8 @@ class ImpactTestSelector:
         base = search_dir or self.root_dir
         test_files = []
         js_ts_test_suffixes = (
-            ".test.ts", ".test.tsx", ".test.js", ".test.jsx",
-            ".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx"
+            ".test.ts", ".test.tsx", ".test.js", ".test.jsx", ".test.mjs", ".test.cjs",
+            ".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx", ".spec.mjs", ".spec.cjs"
         )
         for root, dirs, files in os.walk(base):
             # Exclude virtual environments and cache directories
@@ -158,8 +158,8 @@ class ImpactTestSelector:
 
         # Step 1: If target file is itself a test file, it is directly impacted
         js_ts_test_suffixes = (
-            ".test.ts", ".test.tsx", ".test.js", ".test.jsx",
-            ".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx"
+            ".test.ts", ".test.tsx", ".test.js", ".test.jsx", ".test.mjs", ".test.cjs",
+            ".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx", ".spec.mjs", ".spec.cjs"
         )
         for f in normalized_targets:
             base_name = os.path.basename(f)
@@ -261,7 +261,25 @@ class ImpactTestSelector:
 
         return sorted(list(impacted_tests))
 
-    def run_impacted_tests(self, test_nodes: List[str]) -> subprocess.CompletedProcess:
+    def _safe_run_cmd(self, cmd: List[str], timeout: int) -> subprocess.CompletedProcess:
+        try:
+            return subprocess.run(cmd, cwd=self.root_dir, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as te:
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=124,
+                stdout=te.stdout or "",
+                stderr=f"Test execution timed out after {timeout}s"
+            )
+        except OSError as oe:
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=127,
+                stdout="",
+                stderr=f"Test runner execution failed: {oe}"
+            )
+
+    def run_impacted_tests(self, test_nodes: List[str], timeout: int = 120) -> subprocess.CompletedProcess:
         """Executes pytest or Node test runner against the specified impacted test nodes."""
         if not test_nodes:
             return subprocess.CompletedProcess(args=[], returncode=0, stdout="No tests to run.", stderr="")
@@ -269,14 +287,12 @@ class ImpactTestSelector:
         js_tests = [t for t in test_nodes if t.endswith(JS_TS_EXTENSIONS)]
 
         if js_tests and not py_tests:
-            cmd = ["node", "--test"] + js_tests
-            return subprocess.run(cmd, cwd=self.root_dir, capture_output=True, text=True)
+            return self._safe_run_cmd(["node", "--test"] + js_tests, timeout=timeout)
         elif py_tests and not js_tests:
-            cmd = [sys.executable, "-m", "pytest"] + py_tests + ["-v"]
-            return subprocess.run(cmd, cwd=self.root_dir, capture_output=True, text=True)
+            return self._safe_run_cmd([sys.executable, "-m", "pytest"] + py_tests + ["-v"], timeout=timeout)
         elif py_tests and js_tests:
-            py_res = subprocess.run([sys.executable, "-m", "pytest"] + py_tests + ["-v"], cwd=self.root_dir, capture_output=True, text=True)
-            js_res = subprocess.run(["node", "--test"] + js_tests, cwd=self.root_dir, capture_output=True, text=True)
+            py_res = self._safe_run_cmd([sys.executable, "-m", "pytest"] + py_tests + ["-v"], timeout=timeout)
+            js_res = self._safe_run_cmd(["node", "--test"] + js_tests, timeout=timeout)
             combined_code = py_res.returncode if py_res.returncode != 0 else js_res.returncode
             return subprocess.CompletedProcess(
                 args=["pytest", "node --test"],
@@ -285,5 +301,4 @@ class ImpactTestSelector:
                 stderr=f"Pytest:\n{py_res.stderr}\nNode:\n{js_res.stderr}"
             )
 
-        cmd = [sys.executable, "-m", "pytest"] + test_nodes + ["-v"]
-        return subprocess.run(cmd, cwd=self.root_dir, capture_output=True, text=True)
+        return self._safe_run_cmd([sys.executable, "-m", "pytest"] + test_nodes + ["-v"], timeout=timeout)

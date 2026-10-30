@@ -13,6 +13,7 @@ import sqlite3
 import platform
 import tempfile
 import subprocess
+from contextlib import closing
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -21,6 +22,11 @@ from ..ast_engine.graph import CodebaseGraph
 from ..compiler.autopsy import CausalCrashCompiler
 from ..compiler.reproducer import CrashReproducer
 from ..compiler.state_differ import StateDiffer
+
+MAX_MANIFEST_BYTES = 2 * 1024 * 1024
+MAX_MEMBER_BYTES = 100 * 1024 * 1024
+MAX_TOTAL_BUNDLE_BYTES = 250 * 1024 * 1024
+STREAM_CHUNK_SIZE = 65536
 
 
 class CrashBundler:
@@ -56,18 +62,17 @@ class CrashBundler:
         with tempfile.TemporaryDirectory(prefix="blackbox_bundle_") as temp_dir:
             temp_db_path = os.path.join(temp_dir, "wal.sqlite")
 
-            # 1. Safe SQLite Online Backup API snapshot
-            src_conn = sqlite3.connect(source_db)
-            dest_conn = sqlite3.connect(temp_db_path)
-            with dest_conn:
-                src_conn.backup(dest_conn)
-            dest_conn.close()
-            src_conn.close()
+            with closing(sqlite3.connect(source_db)) as src_conn, closing(sqlite3.connect(temp_db_path)) as dest_conn:
+                with dest_conn:
+                    src_conn.backup(dest_conn)
 
-            # 2. Extract WAL event statistics from snapshot
+            # Capture self-contained SQLite bytes before opening temp_db_path in WAL mode.
+            with open(temp_db_path, "rb") as f_db:
+                snapshot_db_bytes = f_db.read()
+
             total_events = 0
             event_type_counts: Dict[str, int] = {}
-            with sqlite3.connect(temp_db_path) as conn:
+            with closing(sqlite3.connect(temp_db_path)) as conn:
                 cur = conn.cursor()
                 cur.execute("SELECT count(*) FROM blackbox_events")
                 total_events = cur.fetchone()[0]
@@ -75,39 +80,32 @@ class CrashBundler:
                 for et, count in cur.fetchall():
                     event_type_counts[et] = count
 
-            temp_ring = WalRingBuffer(db_path=temp_db_path)
-            ast_graph = CodebaseGraph()
+            with WalRingBuffer(db_path=temp_db_path) as temp_ring:
+                ast_graph = CodebaseGraph()
+                compiler = CausalCrashCompiler(wal_ring=temp_ring, ast_graph=ast_graph)
+                autopsy_md = compiler.compile()
 
-            # 3. Synthesize Autopsy Capsule (.blackbox.md)
-            compiler = CausalCrashCompiler(wal_ring=temp_ring, ast_graph=ast_graph)
-            autopsy_md = compiler.compile()
+                reproducer = CrashReproducer(wal_ring=temp_ring)
+                repro_code = reproducer.generate()
 
-            # 4. Synthesize Standalone Reproduction Test
-            reproducer = CrashReproducer(wal_ring=temp_ring)
-            repro_code = reproducer.generate()
+                recent_excs = temp_ring.query_recent(limit=1, event_type="EXCEPTION")
+                is_node = False
+                if recent_excs:
+                    p = recent_excs[0].get("payload", {})
+                    if p.get("runtime") == "node" or "node:test" in repro_code:
+                        is_node = True
 
-            recent_excs = temp_ring.query_recent(limit=1, event_type="EXCEPTION")
-            is_node = False
-            if recent_excs:
-                p = recent_excs[0].get("payload", {})
-                if p.get("runtime") == "node" or "node:test" in repro_code:
-                    is_node = True
+                repro_filename = "test_blackbox_reproduce.mjs" if is_node else "test_blackbox_reproduce.py"
 
-            repro_filename = "test_blackbox_reproduce.mjs" if is_node else "test_blackbox_reproduce.py"
+                diff_md: Optional[str] = None
+                try:
+                    differ = StateDiffer(wal_ring=temp_ring)
+                    diff_res = differ.diff()
+                    if diff_res and diff_res.get("divergence_point"):
+                        diff_md = differ.compile_markdown(diff_res)
+                except Exception:
+                    diff_md = None
 
-            # 5. Synthesize Time-Travel Execution Diff (if >= 2 runs)
-            diff_md: Optional[str] = None
-            try:
-                differ = StateDiffer(wal_ring=temp_ring)
-                diff_res = differ.diff()
-                if diff_res and diff_res.get("divergence_point"):
-                    diff_md = differ.compile_markdown(diff_res)
-            except Exception:
-                diff_md = None
-
-            temp_ring.close()
-
-            # 6. Gather System & Git Manifest Metadata
             git_branch = None
             git_commit = None
             try:
@@ -140,13 +138,11 @@ class CrashBundler:
             except Exception:
                 pass
 
-            # 7. Collect files and calculate SHA-256 hashes
-            bundle_files: Dict[str, bytes] = {}
-            with open(temp_db_path, "rb") as f_db:
-                bundle_files["wal.sqlite"] = f_db.read()
-
-            bundle_files[".blackbox.md"] = autopsy_md.encode("utf-8")
-            bundle_files[repro_filename] = repro_code.encode("utf-8")
+            bundle_files: Dict[str, bytes] = {
+                "wal.sqlite": snapshot_db_bytes,
+                ".blackbox.md": autopsy_md.encode("utf-8"),
+                repro_filename: repro_code.encode("utf-8"),
+            }
 
             if diff_md:
                 bundle_files[".blackbox-diff.md"] = diff_md.encode("utf-8")
@@ -195,6 +191,33 @@ class CrashBundler:
             "manifest": manifest
         }
 
+    @staticmethod
+    def _is_member_name_safe(name: str) -> bool:
+        if not name or name.startswith(("/", "\\")):
+            return False
+        normalized = name.replace("\\", "/")
+        parts = normalized.split("/")
+        if any(p in ("..", "") for p in parts):
+            return False
+        if ":" in parts[0]:
+            return False
+        return True
+
+    @staticmethod
+    def _read_member_bounded(zf: zipfile.ZipFile, name: str, max_bytes: int) -> bytes:
+        chunks: List[bytes] = []
+        total = 0
+        with zf.open(name, "r") as member_fp:
+            while True:
+                chunk = member_fp.read(STREAM_CHUNK_SIZE)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise ValueError(f"Archive member '{name}' exceeds size limit ({max_bytes} bytes)")
+                chunks.append(chunk)
+        return b"".join(chunks)
+
     def inspect_bundle(self, zip_path: str) -> Dict[str, Any]:
         """
         Inspects a crash bundle archive and verifies SHA-256 member integrity
@@ -213,6 +236,25 @@ class CrashBundler:
         try:
             with zipfile.ZipFile(target_path, "r") as zf:
                 namelist = zf.namelist()
+                if len(namelist) != len(set(namelist)):
+                    return {
+                        "valid": False,
+                        "error": "Archive contains duplicate member entries",
+                        "manifest": None,
+                        "corrupted_files": [],
+                        "files": namelist
+                    }
+
+                for member in namelist:
+                    if not self._is_member_name_safe(member):
+                        return {
+                            "valid": False,
+                            "error": f"Unsafe archive member path detected: {member}",
+                            "manifest": None,
+                            "corrupted_files": [{"file": member, "error": "Unsafe member path"}],
+                            "files": namelist
+                        }
+
                 if "system_manifest.json" not in namelist:
                     return {
                         "valid": False,
@@ -223,7 +265,9 @@ class CrashBundler:
                     }
 
                 try:
-                    manifest_raw = zf.read("system_manifest.json").decode("utf-8")
+                    manifest_raw = self._read_member_bounded(
+                        zf, "system_manifest.json", MAX_MANIFEST_BYTES
+                    ).decode("utf-8")
                     manifest = json.loads(manifest_raw)
                 except Exception as e:
                     return {
@@ -234,18 +278,52 @@ class CrashBundler:
                         "files": namelist
                     }
 
-                checksums = manifest.get("checksums", {})
-                if not isinstance(checksums, dict):
+                if not isinstance(manifest, dict):
                     return {
                         "valid": False,
-                        "error": "Manifest 'checksums' field is not a valid dictionary",
+                        "error": "Manifest root must be a JSON object",
+                        "manifest": None,
+                        "corrupted_files": [],
+                        "files": namelist
+                    }
+
+                checksums = manifest.get("checksums")
+                if not isinstance(checksums, dict) or len(checksums) == 0:
+                    return {
+                        "valid": False,
+                        "error": "Manifest 'checksums' field must be a non-empty dictionary",
                         "manifest": manifest,
                         "corrupted_files": [],
                         "files": namelist
                     }
+
                 corrupted: List[Dict[str, str]] = []
+                total_decompressed = 0
+
+                # Flag any archive member not covered by manifest checksums.
+                for member in namelist:
+                    if member != "system_manifest.json" and member not in checksums:
+                        corrupted.append({
+                            "file": member,
+                            "error": "Unverified extra file present in archive"
+                        })
+
+                manifest_files = manifest.get("files")
+                if manifest_files is not None:
+                    if not isinstance(manifest_files, list) or set(manifest_files) != set(checksums.keys()):
+                        corrupted.append({
+                            "file": "system_manifest.json",
+                            "error": "Manifest 'files' list does not match 'checksums' keys"
+                        })
 
                 for member_name, expected_sha in checksums.items():
+                    if not isinstance(expected_sha, str) or len(expected_sha) != 64:
+                        corrupted.append({
+                            "file": str(member_name),
+                            "error": "Invalid SHA-256 digest format in manifest"
+                        })
+                        continue
+
                     if member_name not in namelist:
                         corrupted.append({
                             "file": member_name,
@@ -253,16 +331,31 @@ class CrashBundler:
                         })
                         continue
 
+                    hasher = hashlib.sha256()
+                    member_bytes = 0
+                    read_failed = False
                     try:
-                        data = zf.read(member_name)
-                    except Exception as re:
+                        with zf.open(member_name, "r") as member_fp:
+                            while True:
+                                chunk = member_fp.read(STREAM_CHUNK_SIZE)
+                                if not chunk:
+                                    break
+                                member_bytes += len(chunk)
+                                total_decompressed += len(chunk)
+                                if member_bytes > MAX_MEMBER_BYTES or total_decompressed > MAX_TOTAL_BUNDLE_BYTES:
+                                    raise ValueError("Decompressed archive exceeds safety limit")
+                                hasher.update(chunk)
+                    except Exception as re_err:
                         corrupted.append({
                             "file": member_name,
-                            "error": f"Failed to decompress archive member: {re}"
+                            "error": f"Failed to decompress archive member: {re_err}"
                         })
+                        read_failed = True
+
+                    if read_failed:
                         continue
 
-                    actual_sha = hashlib.sha256(data).hexdigest()
+                    actual_sha = hasher.hexdigest()
                     if actual_sha != expected_sha:
                         corrupted.append({
                             "file": member_name,

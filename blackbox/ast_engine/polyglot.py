@@ -6,6 +6,8 @@ for symbol extraction, dependency graph generation, and blast-radius calculation
 
 import os
 import re
+import urllib.parse
+import urllib.request
 from typing import Dict, Any, List, Set, Optional, Tuple
 
 
@@ -24,6 +26,11 @@ class PolyglotParser:
         "import", "export", "from", "as", "async", "await", "yield"
     }
 
+    REGEX_PRECEDING_KEYWORDS = {
+        "return", "throw", "case", "typeof", "void", "delete",
+        "in", "of", "instanceof", "new", "yield", "await", "else", "do"
+    }
+
     def __init__(self, file_path: str = "<source>"):
         self.file_path = file_path
         self.imports: List[Dict[str, Any]] = []
@@ -33,8 +40,17 @@ class PolyglotParser:
         self.imported_symbols: Set[str] = set()
         self.defined_symbols: Set[str] = set()
 
+    def _reset_state(self) -> None:
+        self.imports = []
+        self.exports = []
+        self.functions = {}
+        self.imported_modules = set()
+        self.imported_symbols = set()
+        self.defined_symbols = set()
+
     def parse(self, code_str: str) -> Dict[str, Any]:
         """Parses JavaScript/TypeScript source code."""
+        self._reset_state()
         cleaned_code, code_no_comments, line_offsets = self._strip_comments_and_strings(code_str)
         self._extract_imports(code_no_comments, cleaned_code)
         self._extract_exports(code_no_comments, cleaned_code)
@@ -77,6 +93,47 @@ class PolyglotParser:
         # Parse symbols and structure
         self.parse(code_str)
 
+    @staticmethod
+    def _scan_regex_literal(code: str, start: int) -> int:
+        """
+        Scans a single-line JS/TS regex literal starting at `start` ('/').
+        Returns the index immediately after the closing '/' and flags, or -1 if not a valid regex literal.
+        """
+        n = len(code)
+        j = start + 1
+        in_class = False
+        while j < n:
+            ch = code[j]
+            if ch in ("\n", "\r"):
+                return -1
+            if ch == "\\":
+                if j + 1 >= n or code[j + 1] in ("\n", "\r"):
+                    return -1
+                j += 2
+                continue
+            if ch == "[":
+                in_class = True
+            elif ch == "]" and in_class:
+                in_class = False
+            elif ch == "/" and not in_class:
+                j += 1
+                while j < n and code[j] in "dgimsuvy":
+                    j += 1
+                return j
+            j += 1
+        return -1
+
+    def _can_start_regex(self, last_sig_char: str, last_word: str, prev_two_sig: str) -> bool:
+        if not last_sig_char:
+            return True
+        if prev_two_sig in ("++", "--"):
+            return False
+        if last_sig_char in "(,=:[!&|?{};~^%+-*<>":
+            return True
+        if last_word in self.REGEX_PRECEDING_KEYWORDS:
+            return True
+        return False
+
     def _strip_comments_and_strings(self, code: str) -> Tuple[str, str, List[int]]:
         """
         Replaces comment characters and string contents with whitespace,
@@ -95,6 +152,9 @@ class PolyglotParser:
         in_double_quote = False
         in_line_comment = False
         in_block_comment = False
+        last_sig_char = ""
+        prev_sig_char = ""
+        last_word = ""
 
         while i < n:
             c = code[i]
@@ -135,6 +195,9 @@ class PolyglotParser:
                 elif c == "'":
                     chars_clean[i] = " "
                     in_single_quote = False
+                    prev_sig_char = last_sig_char
+                    last_sig_char = "'"
+                    last_word = ""
                     i += 1
                 else:
                     chars_clean[i] = " "
@@ -149,6 +212,9 @@ class PolyglotParser:
                 elif c == '"':
                     chars_clean[i] = " "
                     in_double_quote = False
+                    prev_sig_char = last_sig_char
+                    last_sig_char = '"'
+                    last_word = ""
                     i += 1
                 else:
                     chars_clean[i] = " "
@@ -166,11 +232,17 @@ class PolyglotParser:
                 elif c == "`":
                     chars_clean[i] = " "
                     template_stack.pop()
+                    prev_sig_char = last_sig_char
+                    last_sig_char = "`"
+                    last_word = ""
                     i += 1
                 elif c == "$" and next_c == "{":
                     chars_clean[i] = "$"
                     chars_clean[i + 1] = "{"
                     template_stack[-1] = 1  # inside ${...} with brace depth 1
+                    prev_sig_char = "$"
+                    last_sig_char = "{"
+                    last_word = ""
                     i += 2
                 else:
                     chars_clean[i] = " "
@@ -189,7 +261,7 @@ class PolyglotParser:
                         i += 1
                         continue
 
-            # Start of comments or strings in code mode
+            # Start of comments, strings, or regex literals in code mode
             if c == "/" and next_c == "/":
                 chars_clean[i] = " "
                 chars_clean[i + 1] = " "
@@ -204,6 +276,25 @@ class PolyglotParser:
                 chars_nocomm[i + 1] = " "
                 in_block_comment = True
                 i += 2
+            elif (
+                c == "/"
+                and next_c not in ("/", "*", ">")
+                and (i == 0 or code[i - 1] != "<")
+                and self._can_start_regex(last_sig_char, last_word, prev_sig_char + last_sig_char)
+            ):
+                regex_end = self._scan_regex_literal(code, i)
+                if regex_end != -1:
+                    for k in range(i, regex_end):
+                        chars_clean[k] = " "
+                    prev_sig_char = last_sig_char
+                    last_sig_char = "/"
+                    last_word = ""
+                    i = regex_end
+                else:
+                    prev_sig_char = last_sig_char
+                    last_sig_char = "/"
+                    last_word = ""
+                    i += 1
             elif c == "'":
                 chars_clean[i] = " "
                 in_single_quote = True
@@ -217,6 +308,16 @@ class PolyglotParser:
                 template_stack.append(0)
                 i += 1
             else:
+                if not c.isspace():
+                    if c.isalnum() or c in ("_", "$"):
+                        if last_sig_char and (last_sig_char.isalnum() or last_sig_char in ("_", "$")):
+                            last_word += c
+                        else:
+                            last_word = c
+                    else:
+                        last_word = ""
+                    prev_sig_char = last_sig_char
+                    last_sig_char = c
                 i += 1
 
         if in_single_quote:
@@ -380,13 +481,13 @@ class PolyglotParser:
         # Regex patterns for function headers with support for generics
         # 1. Standard function: function foo<T>(a, b) {
         fn_decl_regex = re.compile(
-            r'(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([a-zA-Z0-9_$]+)?(?:\s*<[^()]+>)?\s*\(([^)]*)\)',
+            r'(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([a-zA-Z0-9_$]+)?(?:\s*<[^();{}]+>)?\s*\(([^)]*)\)',
             re.MULTILINE
         )
 
         # 2. Variable arrow or function: const foo = async <T>(a, b) => {  OR  const foo = function(a, b) {
         var_fn_regex = re.compile(
-            r'(?:export\s+)?(?:const|let|var)\s+([a-zA-Z0-9_$]+)\s*=\s*(?:async\s+)?(?:\s*<[^()]+>)?\s*(?:function\s*\*?(?:\s*<[^()]+>)?\s*\(([^)]*)\)|\(([^)]*)\)\s*(?::\s*[^=]+)?\s*=>|([a-zA-Z0-9_$]+)\s*=>)',
+            r'(?:export\s+)?(?:const|let|var)\s+([a-zA-Z0-9_$]+)\s*=\s*(?:async\s+)?(?:\s*<[^();{}]+>)?\s*(?:function\s*\*?(?:\s*<[^();{}]+>)?\s*\(([^)]*)\)|\(([^)]*)\)\s*(?::\s*[^=;{}]+)?\s*=>|([a-zA-Z0-9_$]+)\s*=>)',
             re.MULTILINE
         )
 
@@ -410,7 +511,7 @@ class PolyglotParser:
                         raw_args=raw_args,
                         start_offset=start_offset,
                         end_offset=body_end,
-                        body_code=raw_code[body_start + 1:body_end],
+                        body_code=cleaned_code[body_start + 1:body_end],
                         line_offsets=line_offsets
                     )
 
@@ -432,7 +533,7 @@ class PolyglotParser:
                         raw_args=raw_args,
                         start_offset=start_offset,
                         end_offset=body_end,
-                        body_code=raw_code[body_start + 1:body_end],
+                        body_code=cleaned_code[body_start + 1:body_end],
                         line_offsets=line_offsets
                     )
             else:
@@ -449,7 +550,7 @@ class PolyglotParser:
                     raw_args=raw_args,
                     start_offset=start_offset,
                     end_offset=end_pos,
-                    body_code=raw_code[header_end:end_pos],
+                    body_code=cleaned_code[header_end:end_pos],
                     line_offsets=line_offsets
                 )
 
@@ -463,7 +564,6 @@ class PolyglotParser:
                 continue
 
             class_body = cleaned_code[class_body_start + 1:class_body_end]
-            class_raw_body = raw_code[class_body_start + 1:class_body_end]
 
             method_regex = re.compile(
                 r'(?:(?:public|private|protected|static|async|override|get|set)\s+)*([a-zA-Z0-9_$]+)\s*\(([^)]*)\)\s*(?::\s*[^\{]+)?\s*\{'
@@ -483,7 +583,7 @@ class PolyglotParser:
                         raw_args=raw_args,
                         start_offset=m_start,
                         end_offset=m_body_end,
-                        body_code=raw_code[m_body_start + 1:m_body_end],
+                        body_code=cleaned_code[m_body_start + 1:m_body_end],
                         line_offsets=line_offsets
                     )
                     # Also register unqualified method name if not already defined
@@ -602,12 +702,25 @@ class PolyglotParser:
             "filename": self.file_path,
             "lineno": lineno,
             "end_lineno": end_lineno,
-            "calls": calls,
+            "calls": sorted(list(calls)),
             "args": args,
             "is_component": is_component,
             "is_route_handler": is_route_handler
         }
         self.defined_symbols.add(name)
+
+
+def _normalize_v8_filepath(filepath: str) -> str:
+    if not filepath:
+        return ""
+    cleaned = filepath.strip()
+    if cleaned.startswith("file://"):
+        try:
+            parsed = urllib.parse.urlparse(cleaned)
+            cleaned = urllib.request.url2pathname(parsed.path)
+        except Exception:
+            pass
+    return cleaned
 
 
 def parse_v8_stack_trace(stderr_text: str) -> Optional[Dict[str, Any]]:
@@ -657,9 +770,9 @@ def parse_v8_stack_trace(stderr_text: str) -> Optional[Dict[str, Any]]:
             return None
 
     # 2. Parse frames: "    at Object.handler (/app/src/index.js:10:5)"
-    # or "    at /app/src/index.js:10:5"
+    # or "    at file:///app/src/index.mjs:10:5"
     frame_pattern = re.compile(
-        r'^\s*at\s+(?:(?P<func>[^(\n]+?)\s+\((?P<file1>[^:\n]+):(?P<line1>\d+):(?P<col1>\d+)\)|(?P<file2>[^:\n]+):(?P<line2>\d+):(?P<col2>\d+))'
+        r'^\s*at\s+(?:(?P<func>[^(\n]+?)\s+\((?P<file1>.+?):(?P<line1>\d+):(?P<col1>\d+)\)|(?P<file2>.+?):(?P<line2>\d+):(?P<col2>\d+))\s*$'
     )
 
     frames: List[Dict[str, Any]] = []
@@ -676,7 +789,7 @@ def parse_v8_stack_trace(stderr_text: str) -> Optional[Dict[str, Any]]:
             else:
                 func = "<anonymous>"
 
-            filepath = fm.group("file1") or fm.group("file2")
+            filepath = _normalize_v8_filepath(fm.group("file1") or fm.group("file2") or "")
             lineno_str = fm.group("line1") or fm.group("line2")
             colno_str = fm.group("col1") or fm.group("col2")
 

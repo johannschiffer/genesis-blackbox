@@ -73,7 +73,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Subcommand: reproduce
     rep_parser = subparsers.add_parser("reproduce", help="Synthesize standalone crash reproduction test script")
     rep_parser.add_argument("--db", default=".blackbox/wal.sqlite", help="Path to WAL database")
-    rep_parser.add_argument("--output", default="test_reproduce.py", help="Output test file path (default: test_reproduce.py)")
+    rep_parser.add_argument("--output", default=None, help="Output test file path (default: test_blackbox_reproduce.py, or .mjs for Node crashes)")
 
     # Subcommand: init-rules
     rules_parser = subparsers.add_parser("init-rules", help="Initialize agent instructions template (Cursor, Claude, Windsurf)")
@@ -141,12 +141,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         # Case 2: Manual event payload recording
         if args.type and args.payload:
-            ring = WalRingBuffer(db_path=args.db)
             try:
                 payload = json.loads(args.payload)
             except Exception:
                 payload = {"raw": args.payload}
-            eid = ring.record(event_type=args.type, payload=payload, source=args.source)
+            with WalRingBuffer(db_path=args.db) as ring:
+                eid = ring.record(event_type=args.type, payload=payload, source=args.source)
             print(f"Recorded event #{eid} into circular WAL ring-buffer ({args.db}).")
             return 0
 
@@ -154,10 +154,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
 
     elif args.command == "autopsy":
-        ring = WalRingBuffer(db_path=args.db)
-        graph = CodebaseGraph()
-        compiler = CausalCrashCompiler(wal_ring=ring, ast_graph=graph)
-        capsule = compiler.compile()
+        with WalRingBuffer(db_path=args.db) as ring:
+            graph = CodebaseGraph()
+            compiler = CausalCrashCompiler(wal_ring=ring, ast_graph=graph)
+            capsule = compiler.compile()
 
         if args.output and args.output != "-":
             os.makedirs(os.path.dirname(os.path.abspath(args.output)) or ".", exist_ok=True)
@@ -196,8 +196,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     elif args.command == "timeline":
-        ring = WalRingBuffer(db_path=args.db)
-        events = ring.query_recent(limit=args.limit)
+        with WalRingBuffer(db_path=args.db) as ring:
+            events = ring.query_recent(limit=args.limit)
         print(f"--- Flight Recorder Timeline ({len(events)} events) [{args.db}] ---")
         for e in reversed(events):
             dur = f" ({e['duration_ms']:.2f}ms)" if e.get("duration_ms") is not None else ""
@@ -216,12 +216,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     elif args.command == "reproduce":
-        ring = WalRingBuffer(db_path=args.db)
-        reproducer = CrashReproducer(wal_ring=ring)
-        code = reproducer.generate()
-        out_target = args.output
-        if out_target == "test_reproduce.py" and reproducer.is_node_target():
-            out_target = "test_blackbox_reproduce.mjs"
+        with WalRingBuffer(db_path=args.db) as ring:
+            reproducer = CrashReproducer(wal_ring=ring)
+            code = reproducer.generate()
+            # Same runtime-aware default that verify and PatchValidator look for.
+            out_target = args.output if args.output is not None else reproducer.get_recommended_filename()
 
         if out_target and out_target != "-":
             out_path = os.path.abspath(out_target)
@@ -260,15 +259,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     elif args.command == "verify":
-        ring = WalRingBuffer(db_path=args.db)
-        verifier = CausalVerifier(wal_ring=ring, db_path=args.db, receipt_path=args.receipt)
         test_file = args.test
         if test_file == "test_blackbox_reproduce.py" and not os.path.isfile(test_file):
             if os.path.isfile("test_blackbox_reproduce.mjs"):
                 test_file = "test_blackbox_reproduce.mjs"
             elif os.path.isfile("test_reproduce.py"):
                 test_file = "test_reproduce.py"
-        result = verifier.verify(test_path=test_file)
+        with WalRingBuffer(db_path=args.db) as ring:
+            verifier = CausalVerifier(wal_ring=ring, db_path=args.db, receipt_path=args.receipt)
+            result = verifier.verify(test_path=test_file)
 
         if result.get("resolved"):
             dur = result.get("duration_ms", 0)

@@ -29,6 +29,7 @@ class WalRingBuffer:
         self.prune_batch_size = max(5, prune_batch_size)
         self._lock = threading.Lock()
         self._insert_counter = 0
+        self._closed = False
 
         # Initialize directory if persistent database
         if self.db_path != ":memory:":
@@ -36,6 +37,12 @@ class WalRingBuffer:
 
         self._conn = self._create_connection()
         self._init_schema()
+
+    def __enter__(self) -> "WalRingBuffer":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
 
     def _create_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=10.0)
@@ -76,13 +83,14 @@ class WalRingBuffer:
         duration_ms: Optional[float] = None,
         trace_id: Optional[str] = None,
         span_id: Optional[str] = None,
-        status: str = "ok"
+        status: str = "ok",
+        timestamp: Optional[float] = None
     ) -> int:
         """
         Records an execution event into the WAL ring-buffer.
         Serialized payload safely handles dict, list, or primitive types.
         """
-        ts = time.time()
+        ts = float(timestamp) if isinstance(timestamp, (int, float)) else time.time()
         payload_json = json.dumps(payload, default=str)
 
         with self._lock:
@@ -218,7 +226,9 @@ class WalRingBuffer:
     def close(self) -> None:
         """Closes the underlying database connection."""
         with self._lock:
-            self._conn.close()
+            if not self._closed:
+                self._conn.close()
+                self._closed = True
 
     def _row_to_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
         data = dict(row)

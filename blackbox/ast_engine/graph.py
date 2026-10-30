@@ -56,11 +56,26 @@ class CodebaseGraph:
         self.nodes: Dict[str, Dict[str, Any]] = {}
         self.callers_map: Dict[str, Set[str]] = {}
 
+    def _evict_file_nodes(self, filename: str) -> None:
+        if filename == "<source>":
+            return
+        stale = [fn for fn, meta in self.nodes.items() if meta.get("filename") == filename]
+        for fn in stale:
+            meta = self.nodes.pop(fn, None)
+            if meta:
+                for callee in meta.get("calls", []):
+                    callers = self.callers_map.get(callee)
+                    if callers:
+                        callers.discard(fn)
+                        if not callers:
+                            self.callers_map.pop(callee, None)
+
     def parse_source(self, code_str: str, filename: str = "<source>") -> None:
         if filename.endswith(JS_TS_EXTENSIONS):
             try:
                 parser = PolyglotParser(filename)
                 res = parser.parse(code_str)
+                self._evict_file_nodes(filename)
                 for f_name, data in res["functions"].items():
                     self.nodes[f_name] = data
                     for callee in data["calls"]:
@@ -75,6 +90,7 @@ class CodebaseGraph:
             tree = ast.parse(code_str, filename=filename)
             visitor = FunctionNodeVisitor(filename)
             visitor.visit(tree)
+            self._evict_file_nodes(filename)
             for f_name, data in visitor.functions.items():
                 self.nodes[f_name] = data
                 for callee in data["calls"]:

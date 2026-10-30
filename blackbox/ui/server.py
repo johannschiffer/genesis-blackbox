@@ -5,6 +5,8 @@ Zero external dependencies. Powered by Python standard library http.server.
 
 import os
 import json
+import sqlite3
+import threading
 import urllib.parse
 import webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -751,6 +753,24 @@ EMBEDDED_HTML = """<!DOCTYPE html>
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
+    def server_close(self):
+        # Wake SSE loops first so their threads exit instead of polling a closed WAL.
+        stop_event = getattr(self, "_stop_event", None)
+        if stop_event is not None:
+            stop_event.set()
+        try:
+            super().server_close()
+        finally:
+            ring = getattr(self, "wal_ring", None)
+            if ring is not None:
+                try:
+                    ring.close()
+                except Exception:
+                    pass
+
+
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
 
 class BlackboxUIRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -768,7 +788,27 @@ class BlackboxUIRequestHandler(BaseHTTPRequestHandler):
     def compiler(self) -> CausalCrashCompiler:
         return self.server.compiler
 
+    def _host_allowed(self) -> bool:
+        # Rejecting foreign Host headers blocks DNS-rebinding pages from reading the API.
+        host_header = self.headers.get("Host", "")
+        if not host_header:
+            return False
+        parsed = urllib.parse.urlsplit(f"//{host_header}")
+        try:
+            hostname = (parsed.hostname or "").lower()
+        except ValueError:
+            return False
+        allowed = set(_LOOPBACK_HOSTS)
+        bind_host = str(self.server.server_address[0]).lower()
+        if bind_host not in ("", "0.0.0.0", "::"):
+            allowed.add(bind_host)
+        return hostname in allowed
+
     def do_GET(self):
+        if not self._host_allowed():
+            self._send_json({"error": "Forbidden: untrusted Host header"}, status=403)
+            return
+
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
@@ -828,7 +868,8 @@ class BlackboxUIRequestHandler(BaseHTTPRequestHandler):
     def _handle_api_autopsy(self):
         recent_exceptions = self.wal_ring.query_recent(limit=1, event_type="EXCEPTION")
         has_crash = len(recent_exceptions) > 0
-        autopsy_text = self.compiler.compile()
+        with self.server._graph_lock:
+            autopsy_text = self.compiler.compile()
 
         exc_info = {}
         if has_crash:
@@ -860,17 +901,19 @@ class BlackboxUIRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": f"File not found: {target_file}"}, status=404)
             return
 
-        self.ast_graph.parse_file(target_file)
-        if symbol:
-            res = self.ast_graph.get_blast_radius(symbol, file_path=target_file)
-        else:
-            nodes = [n for n, d in self.ast_graph.nodes.items() if d.get("filename") == target_file]
-            res = {
-                "file": target_file,
-                "symbols_count": len(nodes),
-                "symbols": nodes,
-                "dependencies": {n: list(self.ast_graph.nodes[n].get("calls", [])) for n in nodes}
-            }
+        # The shared graph is mutated by parse_file; concurrent requests must not interleave.
+        with self.server._graph_lock:
+            self.ast_graph.parse_file(target_file)
+            if symbol:
+                res = self.ast_graph.get_blast_radius(symbol, file_path=target_file)
+            else:
+                nodes = [n for n, d in self.ast_graph.nodes.items() if d.get("filename") == target_file]
+                res = {
+                    "file": target_file,
+                    "symbols_count": len(nodes),
+                    "symbols": nodes,
+                    "dependencies": {n: list(self.ast_graph.nodes[n].get("calls", [])) for n in nodes}
+                }
         self._send_json(res)
 
     def _handle_api_diff_runs(self, query):
@@ -922,8 +965,6 @@ class BlackboxUIRequestHandler(BaseHTTPRequestHandler):
             if parsed_origin.hostname in ("127.0.0.1", "localhost", "::1"):
                 self.send_header("Access-Control-Allow-Origin", origin)
                 self.send_header("Vary", "Origin")
-        else:
-            self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
 
         self.wfile.write(init_frame_bytes)
@@ -933,9 +974,9 @@ class BlackboxUIRequestHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             return
 
-        import time
+        stop_event = self.server._stop_event
         try:
-            while True:
+            while not stop_event.is_set():
                 recent = self.wal_ring.query_recent(limit=50)
                 new_events = [e for e in recent if e.get("id", 0) > last_id]
                 new_events.sort(key=lambda x: x.get("id", 0))
@@ -951,9 +992,10 @@ class BlackboxUIRequestHandler(BaseHTTPRequestHandler):
                     self.wfile.write(b": keep-alive\n\n")
                     self.wfile.flush()
 
-                time.sleep(0.5)
-        except (BrokenPipeError, ConnectionResetError, IOError):
+                stop_event.wait(0.5)
+        except (BrokenPipeError, ConnectionResetError, OSError, sqlite3.Error):
             pass
+        self.close_connection = True
 
     def _handle_api_status(self):
         resp_data = {
@@ -990,6 +1032,8 @@ def create_ui_server(
     server.wal_ring = WalRingBuffer(db_path=db_path)
     server.ast_graph = CodebaseGraph()
     server.compiler = CausalCrashCompiler(server.wal_ring, server.ast_graph)
+    server._graph_lock = threading.Lock()
+    server._stop_event = threading.Event()
     return server
 
 

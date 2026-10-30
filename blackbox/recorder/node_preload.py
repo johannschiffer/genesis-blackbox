@@ -14,6 +14,7 @@ NODE_PRELOAD_CODE = r"""
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
+const { fileURLToPath } = require('url');
 const { performance } = require('perf_hooks');
 
 const spoolPath = process.env.BLACKBOX_NODE_SPOOL;
@@ -44,7 +45,15 @@ function sanitizeHeaders(headers) {
   if (!headers) return {};
   const out = {};
   try {
-    if (typeof headers.forEach === 'function') {
+    // Check tuple arrays before .forEach because Array.prototype.forEach passes numeric indices as the second argument.
+    if (Array.isArray(headers)) {
+      for (const entry of headers) {
+        if (Array.isArray(entry) && entry.length >= 2) {
+          const key = String(entry[0]);
+          out[key] = isSensitiveKey(key) ? '******** [REDACTED]' : String(entry[1]);
+        }
+      }
+    } else if (typeof headers.forEach === 'function') {
       headers.forEach((val, key) => {
         out[key] = isSensitiveKey(key) ? '******** [REDACTED]' : String(val);
       });
@@ -63,6 +72,8 @@ function sanitizeUrl(rawUrl) {
     const strUrl = String(rawUrl);
     const isFull = strUrl.startsWith('http://') || strUrl.startsWith('https://');
     const u = new URL(strUrl, 'http://localhost');
+    if (u.username) u.username = 'REDACTED';
+    if (u.password) u.password = 'REDACTED';
     for (const k of Array.from(u.searchParams.keys())) {
       if (isSensitiveKey(k)) {
         u.searchParams.set(k, 'REDACTED');
@@ -74,14 +85,13 @@ function sanitizeUrl(rawUrl) {
   }
 }
 
-// 1. Wrap global fetch
 if (typeof globalThis.fetch === 'function') {
   const origFetch = globalThis.fetch;
   globalThis.fetch = async function(...args) {
     const start = performance.now();
     const input = args[0];
     const init = args[1] || {};
-    let method = (init.method || (typeof input === 'object' && input.method) || 'GET').toUpperCase();
+    let method = (init.method || (typeof input === 'object' && input && input.method) || 'GET').toUpperCase();
     let urlStr = typeof input === 'string' ? input : (input && input.url ? input.url : String(input));
     urlStr = sanitizeUrl(urlStr);
     const headers = sanitizeHeaders(init.headers || (input && input.headers));
@@ -123,64 +133,101 @@ if (typeof globalThis.fetch === 'function') {
   };
 }
 
-// 2. Wrap http and https client requests
+function resolveRequestMeta(modName, args) {
+  let first = args[0];
+  let second = args[1];
+  if (typeof first === 'function') {
+    first = {};
+    second = {};
+  } else if (typeof second === 'function') {
+    second = {};
+  }
+  const isUrlInput = (typeof first === 'string') || (first instanceof URL);
+  const options = (!isUrlInput && typeof first === 'object' && first !== null) ? first : (typeof second === 'object' && second !== null ? second : {});
+  const method = String(options.method || 'GET').toUpperCase();
+  const headers = sanitizeHeaders(options.headers);
+
+  let rawUrl = '';
+  if (isUrlInput) {
+    try {
+      const parsed = first instanceof URL ? new URL(first.toString()) : new URL(first);
+      if (options.path) {
+        const temp = new URL(options.path, parsed.origin);
+        parsed.pathname = temp.pathname;
+        parsed.search = temp.search;
+      }
+      rawUrl = sanitizeUrl(parsed.toString());
+    } catch (_) {
+      rawUrl = sanitizeUrl(String(first));
+    }
+  } else {
+    const proto = (options.protocol ? String(options.protocol).replace(/:$/, '') : modName);
+    const host = options.hostname || options.host || 'localhost';
+    const hasPortInHost = String(host).includes(':');
+    const portPart = (options.port && !hasPortInHost) ? `:${options.port}` : '';
+    const authPart = options.auth ? 'REDACTED:REDACTED@' : '';
+    const path = options.path || '/';
+    rawUrl = sanitizeUrl(`${proto}://${authPart}${host}${portPart}${path}`);
+  }
+  return { method, rawUrl, headers };
+}
+
+function attachClientListeners(req, modName, meta, start) {
+  if (!req || req._blackboxAttached) return req;
+  req._blackboxAttached = true;
+  req.on('response', (res) => {
+    const duration = performance.now() - start;
+    writeSpool({
+      timestamp: Date.now() / 1000,
+      event_type: 'HTTP_CLIENT',
+      source: `node_${modName}`,
+      status: (res.statusCode >= 400) ? 'error' : 'ok',
+      duration_ms: duration,
+      payload: {
+        method: meta.method,
+        url: meta.rawUrl,
+        status_code: res.statusCode,
+        headers: meta.headers
+      }
+    });
+  });
+  req.on('error', (err) => {
+    const duration = performance.now() - start;
+    writeSpool({
+      timestamp: Date.now() / 1000,
+      event_type: 'HTTP_CLIENT',
+      source: `node_${modName}`,
+      status: 'error',
+      duration_ms: duration,
+      payload: {
+        method: meta.method,
+        url: meta.rawUrl,
+        error: String(err && err.message ? err.message : err),
+        headers: meta.headers
+      }
+    });
+  });
+  return req;
+}
+
 function wrapClientRequest(mod, modName) {
   if (!mod || !mod.request) return;
   const origReq = mod.request;
   mod.request = function(...args) {
     const start = performance.now();
-    let urlArg = args[0];
-    let optArg = args[1];
-    let cbArg = args[2];
-    if (typeof urlArg === 'function') {
-      cbArg = urlArg;
-      urlArg = {};
-    } else if (typeof optArg === 'function') {
-      cbArg = optArg;
-      optArg = {};
-    }
-    const options = (typeof urlArg === 'object' && !(urlArg instanceof URL)) ? urlArg : (optArg || {});
-    const method = (options.method || 'GET').toUpperCase();
-    const host = options.hostname || options.host || 'localhost';
-    const path = options.path || '/';
-    const rawUrl = sanitizeUrl(`${modName}://${host}${path}`);
-    const headers = sanitizeHeaders(options.headers);
-
+    const meta = resolveRequestMeta(modName, args);
     const req = origReq.apply(this, args);
-    req.on('response', (res) => {
-      const duration = performance.now() - start;
-      writeSpool({
-        timestamp: Date.now() / 1000,
-        event_type: 'HTTP_CLIENT',
-        source: `node_${modName}`,
-        status: (res.statusCode >= 400) ? 'error' : 'ok',
-        duration_ms: duration,
-        payload: {
-          method,
-          url: rawUrl,
-          status_code: res.statusCode,
-          headers
-        }
-      });
-    });
-    req.on('error', (err) => {
-      const duration = performance.now() - start;
-      writeSpool({
-        timestamp: Date.now() / 1000,
-        event_type: 'HTTP_CLIENT',
-        source: `node_${modName}`,
-        status: 'error',
-        duration_ms: duration,
-        payload: {
-          method,
-          url: rawUrl,
-          error: String(err.message || err),
-          headers
-        }
-      });
-    });
-    return req;
+    return attachClientListeners(req, modName, meta, start);
   };
+  if (typeof mod.get === 'function') {
+    const origGet = mod.get;
+    mod.get = function(...args) {
+      const start = performance.now();
+      const meta = resolveRequestMeta(modName, args);
+      const req = origGet.apply(this, args);
+      return attachClientListeners(req, modName, meta, start);
+    };
+  }
 }
 
 try {
@@ -188,17 +235,31 @@ try {
   wrapClientRequest(https, 'https');
 } catch (_) {}
 
-// 3. Exception & Rejection Handlers
+function normalizeFrameFile(rawFile) {
+  if (!rawFile) return '';
+  let cleaned = rawFile.trim();
+  if (cleaned.startsWith('file://')) {
+    try {
+      cleaned = fileURLToPath(cleaned);
+    } catch (_) {}
+  }
+  return cleaned;
+}
+
 function extractFrames(stackStr) {
   if (!stackStr) return [];
   const lines = stackStr.split('\n');
   const frames = [];
-  const frameRegex = /^\s*at\s+(?:(?<func>[^(\n]+?)\s+\((?<file1>[^:\n]+):(?<line1>\d+):(?<col1>\d+)\)|(?<file2>[^:\n]+):(?<line2>\d+):(?<col2>\d+))/;
+  // Match colons inside file:// URLs and Windows drive paths up to the trailing :line:col pair.
+  const frameRegex = /^\s*at\s+(?:(?<func>[^(\n]+?)\s+\((?<file1>.+?):(?<line1>\d+):(?<col1>\d+)\)|(?<file2>.+?):(?<line2>\d+):(?<col2>\d+))\s*$/;
   for (const line of lines) {
     const m = frameRegex.exec(line);
     if (m && m.groups) {
-      const func = (m.groups.func || '<anonymous>').trim();
-      const file = m.groups.file1 || m.groups.file2 || '';
+      let func = (m.groups.func || '<anonymous>').trim();
+      if (func.startsWith('async ')) {
+        func = func.slice(6).trim();
+      }
+      const file = normalizeFrameFile(m.groups.file1 || m.groups.file2 || '');
       const lineno = parseInt(m.groups.line1 || m.groups.line2 || '1', 10);
       const colno = parseInt(m.groups.col1 || m.groups.col2 || '1', 10);
       frames.push({ function: func, filename: file, lineno, colno });
@@ -214,7 +275,7 @@ function recordException(err, contextType) {
   const frames = extractFrames(stack);
 
   const userFrames = frames.filter(f => !f.filename.startsWith('node:') && !f.filename.includes('node_modules') && !f.filename.startsWith('internal/'));
-  const rootCause = userFrames.length > 0 ? userFrames[0] : (frames.length > 0 ? frames[0] : { function: 'unknown', filename: '', lineno: 0 });
+  const rootCause = userFrames.length > 0 ? { ...userFrames[0] } : (frames.length > 0 ? { ...frames[0] } : { function: 'unknown', filename: '', lineno: 0 });
 
   rootCause.locals = {};
   const propMatch = /reading ['"]([a-zA-Z0-9_$]+)['"]/.exec(excMsg);
@@ -251,7 +312,20 @@ function recordException(err, contextType) {
 
 function normalizeError(err) {
   if (err instanceof Error) return err;
-  const msg = err === null ? 'null' : (err === undefined ? 'undefined' : (typeof err === 'object' ? JSON.stringify(err) : String(err)));
+  let msg;
+  if (err === null) {
+    msg = 'null';
+  } else if (err === undefined) {
+    msg = 'undefined';
+  } else if (typeof err === 'object') {
+    try {
+      msg = JSON.stringify(err);
+    } catch (_) {
+      msg = Object.prototype.toString.call(err);
+    }
+  } else {
+    msg = String(err);
+  }
   const normalized = new Error(msg);
   normalized.name = (err && err.constructor && err.constructor.name && err.constructor.name !== 'Object') ? err.constructor.name : 'Error';
   return normalized;
@@ -259,14 +333,18 @@ function normalizeError(err) {
 
 process.on('uncaughtException', (err) => {
   recordException(normalizeError(err), 'uncaughtException');
-  console.error(err);
-  process.exit(1);
+  if (process.listenerCount('uncaughtException') <= 1) {
+    console.error(err);
+    process.exit(1);
+  }
 });
 
 process.on('unhandledRejection', (reason) => {
   recordException(normalizeError(reason), 'unhandledRejection');
-  console.error('UnhandledPromiseRejection:', reason);
-  process.exit(1);
+  if (process.listenerCount('unhandledRejection') <= 1) {
+    console.error('UnhandledPromiseRejection:', reason);
+    process.exit(1);
+  }
 });
 """
 
@@ -280,9 +358,9 @@ def write_node_preload_script(target_dir: str) -> str:
     return preload_path
 
 
-def ingest_node_spool(spool_path: str, wal_ring: WalRingBuffer) -> int:
+def ingest_node_spool(spool_path: Optional[str], wal_ring: WalRingBuffer) -> int:
     """Reads JSONL events recorded by Node.js preload hook and ingests them into WalRingBuffer."""
-    if not os.path.isfile(spool_path):
+    if not spool_path or not os.path.isfile(spool_path):
         return 0
 
     count = 0
@@ -299,7 +377,8 @@ def ingest_node_spool(spool_path: str, wal_ring: WalRingBuffer) -> int:
                         payload=event.get("payload", {}),
                         source=event.get("source", "node"),
                         duration_ms=event.get("duration_ms"),
-                        status=event.get("status", "ok")
+                        status=event.get("status", "ok"),
+                        timestamp=event.get("timestamp")
                     )
                     count += 1
                 except Exception:

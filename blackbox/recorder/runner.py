@@ -89,6 +89,7 @@ def run_target(cmd_args, db_path: str = ".blackbox/wal.sqlite") -> int:
             ring.close()
 
     bootstrap_dir = tempfile.mkdtemp(prefix="blackbox_boot_")
+    spool_path = None
     try:
         site_path = os.path.join(bootstrap_dir, "sitecustomize.py")
         with open(site_path, "w", encoding="utf-8") as f_boot:
@@ -109,7 +110,8 @@ def run_target(cmd_args, db_path: str = ".blackbox/wal.sqlite") -> int:
         env["BLACKBOX_NODE_SPOOL"] = spool_path
 
         existing_node_opts = env.get("NODE_OPTIONS", "")
-        req_opt = f'--require "{preload_path}"'
+        escaped_preload = preload_path.replace("\\", "\\\\").replace('"', '\\"')
+        req_opt = f'--require "{escaped_preload}"'
         env["NODE_OPTIONS"] = f"{req_opt} {existing_node_opts}".strip()
 
         start_eid = ring.record(event_type="SUBPROCESS_START", payload={"command": cmd_args}, source="blackbox_runner")
@@ -131,17 +133,10 @@ def run_target(cmd_args, db_path: str = ".blackbox/wal.sqlite") -> int:
                     sys.stderr.write(proc.stderr)
                     sys.stderr.flush()
                 status = "ok" if proc.returncode == 0 else "error"
-                ring.record(
-                    event_type="SUBPROCESS_EXIT",
-                    payload={"command": cmd_args, "returncode": proc.returncode},
-                    source="blackbox_runner",
-                    status=status
-                )
-                # Ingest active runtime events captured in Node spool
+                # Ingest spooled Node events before SUBPROCESS_EXIT so StateDiffer keeps them inside this run.
                 ingest_node_spool(spool_path, ring)
 
                 if proc.returncode != 0 and proc.stderr:
-                    # Check if an EXCEPTION was already recorded by the preload hook in this run
                     recent_excs = [e for e in ring.query_recent(limit=10, event_type="EXCEPTION") if e.get("id", 0) > start_eid]
                     if not recent_excs:
                         from ..ast_engine.polyglot import parse_v8_stack_trace
@@ -153,16 +148,22 @@ def run_target(cmd_args, db_path: str = ".blackbox/wal.sqlite") -> int:
                                 source="node_runner",
                                 status="error"
                             )
+                ring.record(
+                    event_type="SUBPROCESS_EXIT",
+                    payload={"command": cmd_args, "returncode": proc.returncode},
+                    source="blackbox_runner",
+                    status=status
+                )
                 return proc.returncode
             else:
                 proc = subprocess.run(cmd_args, env=env)
+                ingest_node_spool(spool_path, ring)
                 ring.record(
                     event_type="SUBPROCESS_EXIT",
                     payload={"command": cmd_args, "returncode": proc.returncode},
                     source="blackbox_runner",
                     status="ok" if proc.returncode == 0 else "error"
                 )
-                ingest_node_spool(spool_path, ring)
                 return proc.returncode
         except Exception as e:
             ring.record(
