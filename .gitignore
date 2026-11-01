@@ -25,3 +25,6 @@ wheels/
 .DS_Store
 .blackbox/
 .blackbox.md
+.blackbox-diff.md
+.blackbox-resolved.md
+test_blackbox_reproduce.*

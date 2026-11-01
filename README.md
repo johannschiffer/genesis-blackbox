@@ -137,6 +137,30 @@ blackbox ui --port 8765 --no-browser
 
 ---
 
+## Interactive Examples & Benchmarks (`examples/`)
+
+Self-contained executable demonstrations and benchmarks covering the primary real-world workflows in v0.2.0:
+
+### 1. Python Time-Travel SQL & State Divergence (`examples/01_python_time_travel_diff/`)
+Executes an order checkout pipeline across two consecutive runs (healthy baseline vs failing run with silent discount multiplier mutation to `None`). Invokes `CausalCrashCompiler` (`.blackbox.md`) and `StateDiffer` (`.blackbox-diff.md`) to pinpoint the exact divergence point and failing database constraint.
+```bash
+python examples/01_python_time_travel_diff/run_demo.py
+```
+
+### 2. Node.js / TypeScript Runtime Preload & V8 Reproducer (`examples/02_node_ts_async_crash/`)
+Runs a Node.js/TypeScript asynchronous service with the zero-dependency `NODE_OPTIONS` preload interceptor active. Proves automatic in-flight credential redaction (`Authorization: Bearer ...`, `Cookie: ...`, `?api_key=...`), computes polyglot AST blast-radius across `.mjs`/`.ts` files, and synthesizes a standalone `node:test` reproduction script (`test_blackbox_reproduce.mjs`).
+```bash
+python examples/02_node_ts_async_crash/run_demo.py
+```
+
+### 3. Autonomous 1-Shot Agent Repair Loop (`examples/03_autonomous_patch_loop/`)
+Executes the full 5-phase autonomous AI agent repair lifecycle inside an isolated sandbox: records a crashing target (`run_target`), synthesizes reproduction test (`CrashReproducer`), generates context-dense prompt packet (`PromptSynthesizer`), validates candidate unified diff patch with guaranteed rollback safety (`PatchValidator.evaluate_patch`), and issues cryptographic verification receipt (`CausalVerifier` -> `.blackbox-resolved.md`).
+```bash
+python examples/03_autonomous_patch_loop/run_demo.py
+```
+
+---
+
 ## MCP Server Configuration
 
 `genesis-blackbox` ships the `blackbox-mcp` stdio server exposing 11 diagnostic and repair tools:
