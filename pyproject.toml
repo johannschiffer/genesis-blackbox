@@ -34,7 +34,7 @@ blackbox = "blackbox.cli:main"
 blackbox-mcp = "blackbox.mcp_server:main"
 
 [project.entry-points.pytest11]
-blackbox = "blackbox.pytest_plugin"
+blackbox = "blackbox.integrations.pytest_plugin"
 
 [project.urls]
 Homepage = "https://github.com/johannschiffer/genesis-blackbox"
