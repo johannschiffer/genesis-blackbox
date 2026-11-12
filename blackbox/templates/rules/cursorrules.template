@@ -1,12 +1,13 @@
-# Genesis Blackbox v0.4.0 Integration Directives for Cursor Agent
+# Genesis Blackbox v0.5.0 Integration Directives for Cursor Agent
 
 You are working in a repository equipped with Genesis Blackbox runtime flight recording.
-Follow this mandatory v0.4.0 autonomous debug and repair protocol whenever resolving any runtime exception, test failure, or bug:
+Follow this mandatory v0.5.0 autonomous debug and repair protocol whenever resolving any runtime exception, test failure, or bug:
 
 ## Mandatory Autonomous Debug Loop (Zero Guessing Gate)
 
-0. **Fast 1-Call Incident Context & Surgical Watch**
-   - Call MCP tool `get_full_incident_context` to retrieve `.blackbox.md` autopsy, baseline divergence diff, reproduction test, and AST-impacted tests in a single call.
+0. **Fast 1-Call Incident Context, Async Trace & Surgical Watch**
+   - Call MCP tool `get_full_incident_context` to retrieve `.blackbox.md` autopsy, baseline divergence diff, reproduction test, AST-impacted tests, and `performance_and_flakiness` diagnostics in a single call.
+   - Call `diagnose_performance_and_flakiness` (or CLI `blackbox diagnose-perf`) to inspect N+1 SQL query loops, baseline latency regressions, and flaky test non-determinism causes (`TraceContext` isolates concurrent async requests).
    - Run `pytest --blackbox` (or `blackbox watch` in background) for automatic clean baseline rotation (`.blackbox/wal.baseline.sqlite`, override with `--no-auto-baseline`) and immediate `.blackbox-diff.md` + `## Automatic Baseline Divergence` generation on failure.
 
 1. **Step 1: Autopsy & Time-Travel Diff**

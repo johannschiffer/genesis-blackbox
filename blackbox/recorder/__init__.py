@@ -17,6 +17,7 @@ from .sql_interceptor import (
 from .process_hook import SubprocessInterceptor, sanitize_command_and_args
 from .baseline import BaselineManager
 from .watcher import SurgicalWatcher
+from .context import TraceContext, get_current_trace_id, get_current_span_id
 
 __all__ = [
     "WalRingBuffer",
@@ -35,5 +36,8 @@ __all__ = [
     "sanitize_command_and_args",
     "BaselineManager",
     "SurgicalWatcher",
+    "TraceContext",
+    "get_current_trace_id",
+    "get_current_span_id",
 ]
 

@@ -135,6 +135,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     watch_parser.add_argument("--db", default=".blackbox/wal.sqlite", help="Path to WAL database (default: .blackbox/wal.sqlite)")
     watch_parser.add_argument("--no-auto-baseline", action="store_true", default=False, help="Disable automatic baseline promotion on passing runs")
 
+    # Subcommand: diagnose-perf
+    perf_parser = subparsers.add_parser("diagnose-perf", help="Analyze N+1 SQL queries, latency regressions, and test flakiness")
+    perf_parser.add_argument("--db", default=".blackbox/wal.sqlite", help="Path to WAL database (default: .blackbox/wal.sqlite)")
+    perf_parser.add_argument("--baseline", default=".blackbox/wal.baseline.sqlite", help="Path to baseline WAL database (default: .blackbox/wal.baseline.sqlite)")
+    perf_parser.add_argument("--threshold", type=int, default=5, help="Minimum repeated fingerprint count for N+1 SQL alerts (default: 5)")
+    perf_parser.add_argument("--json", action="store_true", help="Output structured JSON instead of markdown")
+
     args = parser.parse_args(argv)
 
 
@@ -421,6 +428,20 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         print(f"[Genesis-Blackbox] Watching {watcher.root_dir} (interval={watcher.interval}s)...")
         watcher.watch()
+        return 0
+
+    elif args.command == "diagnose-perf":
+        from .compiler.flake_analyzer import FlakeAnalyzer
+        analyzer = FlakeAnalyzer()
+        report = analyzer.analyze_flakiness(
+            wal_path=args.db,
+            baseline_path=args.baseline,
+            n_plus_one_threshold=args.threshold,
+        )
+        if args.json:
+            print(json.dumps(report, indent=2, default=str))
+        else:
+            print(report["markdown_report"])
         return 0
 
     return 0

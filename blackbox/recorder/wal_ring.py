@@ -10,6 +10,7 @@ import json
 import sqlite3
 import threading
 from typing import Dict, Any, List, Optional
+from .context import get_current_span_id, get_current_trace_id
 
 
 class WalRingBuffer:
@@ -91,7 +92,18 @@ class WalRingBuffer:
         Serialized payload safely handles dict, list, or primitive types.
         """
         ts = float(timestamp) if isinstance(timestamp, (int, float)) else time.time()
-        payload_json = json.dumps(payload, default=str)
+        active_trace_id = trace_id if trace_id is not None else get_current_trace_id()
+        active_span_id = span_id if span_id is not None else get_current_span_id()
+
+        payload_to_serialize = payload
+        if isinstance(payload, dict) and active_trace_id is not None:
+            payload_to_serialize = dict(payload)
+            if not payload_to_serialize.get("trace_id"):
+                payload_to_serialize["trace_id"] = active_trace_id
+            if active_span_id is not None and not payload_to_serialize.get("span_id"):
+                payload_to_serialize["span_id"] = active_span_id
+
+        payload_json = json.dumps(payload_to_serialize, default=str)
 
         with self._lock:
             with self._conn:
@@ -101,7 +113,7 @@ class WalRingBuffer:
                         timestamp, event_type, source, duration_ms, trace_id, span_id, status, payload
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
                     """,
-                    (ts, event_type, source, duration_ms, trace_id, span_id, status, payload_json)
+                    (ts, event_type, source, duration_ms, active_trace_id, active_span_id, status, payload_json)
                 )
                 event_id = cursor.lastrowid
                 self._insert_counter += 1

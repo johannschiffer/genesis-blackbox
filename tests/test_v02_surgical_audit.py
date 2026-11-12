@@ -524,6 +524,7 @@ def test_mcp_tools_list_exposes_all_tools(tmp_path: Path):
             "record_event", "compare_execution_runs", "get_repair_prompt",
             "create_crash_bundle", "inspect_crash_bundle",
             "get_full_incident_context",
+            "diagnose_performance_and_flakiness",
         }
     finally:
         server.close()

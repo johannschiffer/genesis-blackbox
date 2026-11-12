@@ -314,6 +314,35 @@ class BlackboxMCPServer:
                     baseline_db_path=args.get("baseline_db_path", ".blackbox/wal.baseline.sqlite"),
                     root_dir=args.get("root_dir", ".")
                 )
+            },
+            "diagnose_performance_and_flakiness": {
+                "name": "diagnose_performance_and_flakiness",
+                "description": "Detects N+1 SQL query loops, baseline latency regressions, and flaky test non-determinism causes.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "db_path": {
+                            "type": "string",
+                            "description": "Path to WAL SQLite database (default: .blackbox/wal.sqlite)",
+                            "default": ".blackbox/wal.sqlite"
+                        },
+                        "baseline_db_path": {
+                            "type": "string",
+                            "description": "Path to baseline WAL SQLite database (default: .blackbox/wal.baseline.sqlite)",
+                            "default": ".blackbox/wal.baseline.sqlite"
+                        },
+                        "n_plus_one_threshold": {
+                            "type": "integer",
+                            "description": "Minimum repeated SQL fingerprint count for N+1 detection (default: 5)",
+                            "default": 5
+                        }
+                    }
+                },
+                "handler": lambda args: self.diagnose_performance_and_flakiness(
+                    db_path=args.get("db_path", self.default_db_path),
+                    baseline_db_path=args.get("baseline_db_path", ".blackbox/wal.baseline.sqlite"),
+                    n_plus_one_threshold=int(args.get("n_plus_one_threshold", 5))
+                )
             }
         }
         self.tools["blackbox_get_crash_autopsy"] = self.tools["get_crash_autopsy"]
@@ -328,6 +357,7 @@ class BlackboxMCPServer:
         self.tools["blackbox_create_crash_bundle"] = self.tools["create_crash_bundle"]
         self.tools["blackbox_inspect_crash_bundle"] = self.tools["inspect_crash_bundle"]
         self.tools["blackbox_get_full_incident_context"] = self.tools["get_full_incident_context"]
+        self.tools["blackbox_diagnose_performance_and_flakiness"] = self.tools["diagnose_performance_and_flakiness"]
 
     def generate_reproduction_test(self, db_path: str = ".blackbox/wal.sqlite") -> str:
         """Synthesizes and returns standalone Python reproduction test script from WAL database."""
@@ -444,12 +474,33 @@ class BlackboxMCPServer:
             diff=True,
         )
 
+        performance_and_flakiness = self.diagnose_performance_and_flakiness(
+            db_path=db_path,
+            baseline_db_path=baseline_db_path,
+        )
+
         return {
             "autopsy_markdown": autopsy_markdown,
             "baseline_diff": baseline_diff,
             "reproduction_test": reproduction_test,
             "impacted_tests": impacted_tests,
+            "performance_and_flakiness": performance_and_flakiness,
         }
+
+    def diagnose_performance_and_flakiness(
+        self,
+        db_path: str = ".blackbox/wal.sqlite",
+        baseline_db_path: str = ".blackbox/wal.baseline.sqlite",
+        n_plus_one_threshold: int = 5,
+    ) -> Dict[str, Any]:
+        """Analyzes N+1 SQL query patterns, baseline latency regressions, and test flakiness."""
+        from .compiler.flake_analyzer import FlakeAnalyzer
+        analyzer = FlakeAnalyzer()
+        return analyzer.analyze_flakiness(
+            wal_path=db_path,
+            baseline_path=baseline_db_path,
+            n_plus_one_threshold=n_plus_one_threshold,
+        )
 
     def get_crash_autopsy(self, db_path: str = ".blackbox/wal.sqlite") -> str:
         """Compiles and returns .blackbox.md autopsy markdown from WAL database."""
@@ -540,7 +591,8 @@ class BlackboxMCPServer:
                 "get_repair_prompt",
                 "create_crash_bundle",
                 "inspect_crash_bundle",
-                "get_full_incident_context"
+                "get_full_incident_context",
+                "diagnose_performance_and_flakiness"
             ]
 
             tool_list = [

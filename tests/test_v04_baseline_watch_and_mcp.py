@@ -270,6 +270,7 @@ def test_mcp_get_full_incident_context_single_call(tmp_path: Path):
             "baseline_diff",
             "reproduction_test",
             "impacted_tests",
+            "performance_and_flakiness",
         }
         assert "ValueError" in payload["autopsy_markdown"]
         assert isinstance(payload["baseline_diff"], dict)

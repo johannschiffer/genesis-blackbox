@@ -10,6 +10,7 @@ import uuid
 from typing import Dict, Any, List, Optional, Callable, Tuple
 from urllib.parse import parse_qs
 
+from .context import TraceContext, extract_trace_id_from_headers, get_current_span_id, get_current_trace_id
 from .wal_ring import WalRingBuffer
 
 SENSITIVE_HEADERS = {
@@ -124,7 +125,7 @@ class BlackboxASGIMiddleware:
         path = scope.get("path", "/")
         query_string = scope.get("query_string", b"").decode("latin1")
         headers = sanitize_headers(scope.get("headers", []))
-        trace_id = headers.get("x-trace-id") or headers.get("x-request-id")
+        trace_id = extract_trace_id_from_headers(headers)
 
         start_time = time.perf_counter()
         request_body_chunks = []
@@ -152,42 +153,44 @@ class BlackboxASGIMiddleware:
 
         status = "ok"
         error_msg = None
-        try:
-            await self.app(scope, intercepted_receive, intercepted_send)
-        except Exception as exc:
-            status = "error"
-            error_msg = str(exc)
-            status_code[0] = 500
-            raise
-        finally:
-            duration_ms = (time.perf_counter() - start_time) * 1000.0
-            req_body_raw = b"".join(request_body_chunks)
-            res_body_raw = b"".join(response_body_chunks)
-
-            payload = {
-                "method": method,
-                "path": path,
-                "query": query_string,
-                "request_headers": headers,
-                "request_body": sanitize_payload(req_body_raw),
-                "status_code": status_code[0],
-                "response_headers": response_headers[0],
-                "response_body": sanitize_payload(res_body_raw),
-            }
-            if error_msg:
-                payload["error"] = error_msg
-
-            if status_code[0] >= 500:
+        async with TraceContext.span(trace_id=trace_id) as span_ctx:
+            try:
+                await self.app(scope, intercepted_receive, intercepted_send)
+            except Exception as exc:
                 status = "error"
+                error_msg = str(exc)
+                status_code[0] = 500
+                raise
+            finally:
+                duration_ms = (time.perf_counter() - start_time) * 1000.0
+                req_body_raw = b"".join(request_body_chunks)
+                res_body_raw = b"".join(response_body_chunks)
 
-            self.wal_ring.record(
-                event_type="http_transaction",
-                source="asgi",
-                duration_ms=round(duration_ms, 3),
-                trace_id=trace_id,
-                status=status,
-                payload=payload
-            )
+                payload = {
+                    "method": method,
+                    "path": path,
+                    "query": query_string,
+                    "request_headers": headers,
+                    "request_body": sanitize_payload(req_body_raw),
+                    "status_code": status_code[0],
+                    "response_headers": response_headers[0],
+                    "response_body": sanitize_payload(res_body_raw),
+                }
+                if error_msg:
+                    payload["error"] = error_msg
+
+                if status_code[0] >= 500:
+                    status = "error"
+
+                self.wal_ring.record(
+                    event_type="http_transaction",
+                    source="asgi",
+                    duration_ms=round(duration_ms, 3),
+                    trace_id=span_ctx.trace_id,
+                    span_id=span_ctx.span_id,
+                    status=status,
+                    payload=payload
+                )
 
 
 class _ReplayingWSGIInput:
@@ -284,7 +287,7 @@ class BlackboxWSGIMiddleware:
                 raw_headers.append((k.replace("_", "-").lower(), v))
 
         headers = sanitize_headers(raw_headers)
-        trace_id = headers.get("x-trace-id") or headers.get("x-request-id")
+        trace_id = extract_trace_id_from_headers(headers)
 
         req_body = None
         content_length = environ.get("CONTENT_LENGTH")
@@ -314,52 +317,54 @@ class BlackboxWSGIMiddleware:
         resp_chunks = []
         captured_resp_bytes = 0
         result = None
-        try:
-            result = self.app(environ, intercepted_start_response)
-            for chunk in result:
-                if isinstance(chunk, bytes) and captured_resp_bytes < self.max_body_bytes:
-                    take = chunk[: self.max_body_bytes - captured_resp_bytes]
-                    resp_chunks.append(take)
-                    captured_resp_bytes += len(take)
-                yield chunk
-        except Exception as exc:
-            status = "error"
-            error_msg = str(exc)
-            status_code[0] = 500
-            raise
-        finally:
-            if result is not None and hasattr(result, "close"):
-                try:
-                    result.close()
-                except Exception:
-                    pass
-            duration_ms = (time.perf_counter() - start_time) * 1000.0
-            res_body_raw = b"".join(resp_chunks)
-
-            payload = {
-                "method": method,
-                "path": path,
-                "query": query_string,
-                "request_headers": headers,
-                "request_body": sanitize_payload(req_body),
-                "status_code": status_code[0],
-                "response_headers": resp_headers[0],
-                "response_body": sanitize_payload(res_body_raw),
-            }
-            if error_msg:
-                payload["error"] = error_msg
-
-            if status_code[0] >= 500:
+        with TraceContext.span(trace_id=trace_id) as span_ctx:
+            try:
+                result = self.app(environ, intercepted_start_response)
+                for chunk in result:
+                    if isinstance(chunk, bytes) and captured_resp_bytes < self.max_body_bytes:
+                        take = chunk[: self.max_body_bytes - captured_resp_bytes]
+                        resp_chunks.append(take)
+                        captured_resp_bytes += len(take)
+                    yield chunk
+            except Exception as exc:
                 status = "error"
+                error_msg = str(exc)
+                status_code[0] = 500
+                raise
+            finally:
+                if result is not None and hasattr(result, "close"):
+                    try:
+                        result.close()
+                    except Exception:
+                        pass
+                duration_ms = (time.perf_counter() - start_time) * 1000.0
+                res_body_raw = b"".join(resp_chunks)
 
-            self.wal_ring.record(
-                event_type="http_transaction",
-                source="wsgi",
-                duration_ms=round(duration_ms, 3),
-                trace_id=trace_id,
-                status=status,
-                payload=payload
-            )
+                payload = {
+                    "method": method,
+                    "path": path,
+                    "query": query_string,
+                    "request_headers": headers,
+                    "request_body": sanitize_payload(req_body),
+                    "status_code": status_code[0],
+                    "response_headers": resp_headers[0],
+                    "response_body": sanitize_payload(res_body_raw),
+                }
+                if error_msg:
+                    payload["error"] = error_msg
+
+                if status_code[0] >= 500:
+                    status = "error"
+
+                self.wal_ring.record(
+                    event_type="http_transaction",
+                    source="wsgi",
+                    duration_ms=round(duration_ms, 3),
+                    trace_id=span_ctx.trace_id,
+                    span_id=span_ctx.span_id,
+                    status=status,
+                    payload=payload
+                )
 
 
 class HttpTraceContext:
@@ -422,6 +427,8 @@ class HttpTraceContext:
             event_type="http_transaction",
             source=self.source,
             duration_ms=round(duration_ms, 3),
+            trace_id=get_current_trace_id(),
+            span_id=get_current_span_id(),
             status=self.status,
             payload=payload
         )

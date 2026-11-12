@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 from ..recorder.wal_ring import WalRingBuffer
 from ..ast_engine.graph import CodebaseGraph
+from .perf_detector import PerformanceDetector
 
 
 class CausalCrashCompiler:
@@ -36,6 +37,7 @@ class CausalCrashCompiler:
         If exception_data is None, attempts to extract the latest exception from WAL.
         """
         crash_timestamp: Optional[float] = None
+        crash_trace_id: Optional[str] = None
 
         # 1. Resolve exception data from WAL if not provided
         if exception_data is None and self.wal_ring:
@@ -44,10 +46,14 @@ class CausalCrashCompiler:
                 latest_exc_event = recent_exceptions[0]
                 exception_data = latest_exc_event.get("payload")
                 crash_timestamp = latest_exc_event.get("timestamp")
+                crash_trace_id = latest_exc_event.get("trace_id")
 
         if not exception_data:
             # Handle case where no exception was captured
             return self._compile_empty_or_healthy_capsule(recent_events_count)
+
+        if not crash_trace_id and isinstance(exception_data, dict):
+            crash_trace_id = exception_data.get("trace_id") or (exception_data.get("root_cause") or {}).get("trace_id")
 
         exc_type = exception_data.get("exception_type", "UnknownException")
         exc_msg = exception_data.get("exception_message", "")
@@ -60,8 +66,24 @@ class CausalCrashCompiler:
 
         # 2. Extract recent execution events from flight recorder
         recent_events: List[Dict[str, Any]] = []
+        perf_events: List[Dict[str, Any]] = []
         if self.wal_ring:
-            recent_events = self.wal_ring.query_recent(limit=recent_events_count)
+            perf_events = self.wal_ring.query_recent(limit=max(recent_events_count, 100))
+            recent_events = perf_events[:recent_events_count]
+
+        def _matches_crash_trace(ev: Dict[str, Any]) -> bool:
+            if not crash_trace_id:
+                return False
+            if ev.get("trace_id") == crash_trace_id:
+                return True
+            p = ev.get("payload")
+            return isinstance(p, dict) and p.get("trace_id") == crash_trace_id
+
+        if crash_trace_id and recent_events:
+            # Prioritize events sharing the crash trace_id while preserving relative order
+            same_trace = [e for e in recent_events if _matches_crash_trace(e)]
+            other_trace = [e for e in recent_events if not _matches_crash_trace(e)]
+            recent_events = same_trace + other_trace
 
         # Classify recent events
         http_events: List[Dict[str, Any]] = []
@@ -79,6 +101,10 @@ class CausalCrashCompiler:
                 subprocess_events.append(e)
             elif etype != "EXCEPTION":
                 other_events.append(e)
+
+        n_plus_one_findings = PerformanceDetector().detect_n_plus_one(
+            [e for e in perf_events if _matches_crash_trace(e)] if crash_trace_id else perf_events
+        )
 
         # 3. Compute AST blast-radius
         blast_radius: Dict[str, Any] = {}
@@ -107,6 +133,8 @@ class CausalCrashCompiler:
         md.append("# 🚨 BLACKBOX CRASH AUTOPSY CAPSULE")
         md.append(f"**Exception:** `{exc_type}`: {exc_msg}")
         md.append(f"**Timestamp (UTC):** `{ts_str}`")
+        if crash_trace_id:
+            md.append(f"**Trace ID:** `{crash_trace_id}`")
         if culprit_file:
             md.append(f"**Culprit File:** `{culprit_file}` (Line {root_cause.get('lineno')})")
         if target_fn:
@@ -224,10 +252,11 @@ class CausalCrashCompiler:
                 etype = e.get("event_type")
                 esrc = e.get("source")
                 estatus = e.get("status")
+                trace_badge = " [trace]" if _matches_crash_trace(e) else ""
                 payload = str(e.get("payload"))
                 if len(payload) > 60:
                     payload = payload[:57] + "..."
-                md.append(f"| #{eid} | `{etype}` | `{esrc}` | `{estatus}` | {payload} |")
+                md.append(f"| #{eid} | `{etype}`{trace_badge} | `{esrc}` | `{estatus}` | {payload} |")
             md.append("")
         else:
             md.append("*No preceding events found in WAL.*")
@@ -259,6 +288,19 @@ class CausalCrashCompiler:
             md.append("```diff")
             md.append(git_diff_text)
             md.append("```")
+            md.append("")
+
+        if n_plus_one_findings:
+            md.append("## Performance & N+1 Query Diagnostics")
+            md.append("| SQL Fingerprint | Executions | Total Latency | Trace ID | Sample Query |")
+            md.append("|---|---|---|---|---|")
+            for item in n_plus_one_findings:
+                fp_cell = item["fingerprint"].replace("|", "\\|")
+                sample_cell = item["sample_query"][:60].replace("|", "\\|")
+                tid_cell = item.get("trace_id") or "-"
+                md.append(
+                    f"| `{fp_cell}` | `{item['count']}x` | `{item['total_duration_ms']:.2f}ms` | `{tid_cell}` | `{sample_cell}` |"
+                )
             md.append("")
 
         # Section 6: Suggested Fix Mandate

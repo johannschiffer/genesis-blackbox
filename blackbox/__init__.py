@@ -2,7 +2,7 @@
 Genesis Blackbox: Flight Recorder & AST Blast-Radius Causal Crash Compiler.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 __author__ = "Johann Schiffer / Project Genesis"
 __license__ = "MIT"
 
@@ -13,6 +13,7 @@ from .recorder.sql_interceptor import TracedConnection, TracedCursor, SqlInterce
 from .recorder.process_hook import SubprocessInterceptor
 from .recorder.baseline import BaselineManager
 from .recorder.watcher import SurgicalWatcher
+from .recorder.context import TraceContext, get_current_trace_id, get_current_span_id
 from .instrumentation import auto_instrument
 from .integrations import instrument_fastapi, instrument_flask, instrument_engine
 from .ast_engine.graph import CodebaseGraph
@@ -24,6 +25,8 @@ from .compiler.verifier import CausalVerifier
 from .compiler.patch_validator import PatchValidator
 from .compiler.state_differ import StateDiffer
 from .compiler.prompt_synth import PromptSynthesizer
+from .compiler.perf_detector import PerformanceDetector
+from .compiler.flake_analyzer import FlakeAnalyzer
 from .recorder.bundle import CrashBundler
 from .ci.github_summary import export_github_step_summary
 from .mcp_server import BlackboxMCPServer
@@ -44,6 +47,9 @@ __all__ = [
     "SubprocessInterceptor",
     "BaselineManager",
     "SurgicalWatcher",
+    "TraceContext",
+    "get_current_trace_id",
+    "get_current_span_id",
     "auto_instrument",
     "instrument_fastapi",
     "instrument_flask",
@@ -58,6 +64,8 @@ __all__ = [
     "PatchValidator",
     "StateDiffer",
     "PromptSynthesizer",
+    "PerformanceDetector",
+    "FlakeAnalyzer",
     "CrashBundler",
     "export_github_step_summary",
     "BlackboxMCPServer"
