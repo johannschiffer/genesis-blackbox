@@ -285,6 +285,35 @@ class BlackboxMCPServer:
                 "handler": lambda args: self.inspect_crash_bundle(
                     zip_path=args["zip_path"]
                 )
+            },
+            "get_full_incident_context": {
+                "name": "get_full_incident_context",
+                "description": "Returns autopsy markdown, baseline divergence diff, reproduction test, and AST-impacted tests in a single JSON payload.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "db_path": {
+                            "type": "string",
+                            "description": "Path to WAL SQLite database (default: .blackbox/wal.sqlite)",
+                            "default": ".blackbox/wal.sqlite"
+                        },
+                        "baseline_db_path": {
+                            "type": "string",
+                            "description": "Path to baseline WAL SQLite database (default: .blackbox/wal.baseline.sqlite)",
+                            "default": ".blackbox/wal.baseline.sqlite"
+                        },
+                        "root_dir": {
+                            "type": "string",
+                            "description": "Project root directory for AST impact discovery (default: .)",
+                            "default": "."
+                        }
+                    }
+                },
+                "handler": lambda args: self.get_full_incident_context(
+                    db_path=args.get("db_path", self.default_db_path),
+                    baseline_db_path=args.get("baseline_db_path", ".blackbox/wal.baseline.sqlite"),
+                    root_dir=args.get("root_dir", ".")
+                )
             }
         }
         self.tools["blackbox_get_crash_autopsy"] = self.tools["get_crash_autopsy"]
@@ -298,6 +327,7 @@ class BlackboxMCPServer:
         self.tools["blackbox_get_repair_prompt"] = self.tools["get_repair_prompt"]
         self.tools["blackbox_create_crash_bundle"] = self.tools["create_crash_bundle"]
         self.tools["blackbox_inspect_crash_bundle"] = self.tools["inspect_crash_bundle"]
+        self.tools["blackbox_get_full_incident_context"] = self.tools["get_full_incident_context"]
 
     def generate_reproduction_test(self, db_path: str = ".blackbox/wal.sqlite") -> str:
         """Synthesizes and returns standalone Python reproduction test script from WAL database."""
@@ -374,6 +404,52 @@ class BlackboxMCPServer:
         from .recorder.bundle import CrashBundler
         bundler = CrashBundler()
         return bundler.inspect_bundle(zip_path=zip_path)
+
+    def get_full_incident_context(
+        self,
+        db_path: str = ".blackbox/wal.sqlite",
+        baseline_db_path: str = ".blackbox/wal.baseline.sqlite",
+        root_dir: str = "."
+    ) -> Dict[str, Any]:
+        """Returns autopsy markdown, baseline diff, reproduction test, and impacted tests in one call."""
+        from .ast_engine.impact import ImpactTestSelector
+        from .compiler.state_differ import StateDiffer
+
+        with self._resolve_ring(db_path) as ring:
+            compiler = CausalCrashCompiler(wal_ring=ring, ast_graph=self.ast_graph)
+            autopsy_markdown = compiler.compile()
+
+            reproducer = CrashReproducer(wal_ring=ring)
+            reproduction_test = reproducer.generate()
+
+            baseline_diff: Optional[Dict[str, Any]] = None
+            if baseline_db_path and os.path.isfile(baseline_db_path):
+                differ = StateDiffer(wal_ring=ring)
+                try:
+                    baseline_diff = differ.diff_against_baseline(baseline_db_path)
+                except Exception:
+                    baseline_diff = None
+
+            target_files: List[str] = []
+            exc_events = ring.query_recent(limit=1, event_type="EXCEPTION")
+            if exc_events:
+                rc = (exc_events[0].get("payload") or {}).get("root_cause") or {}
+                culprit = rc.get("filename")
+                if culprit and os.path.isfile(culprit):
+                    target_files.append(culprit)
+
+        selector = ImpactTestSelector(root_dir=root_dir)
+        impacted_tests = selector.find_impacted_tests(
+            files=target_files if target_files else None,
+            diff=True,
+        )
+
+        return {
+            "autopsy_markdown": autopsy_markdown,
+            "baseline_diff": baseline_diff,
+            "reproduction_test": reproduction_test,
+            "impacted_tests": impacted_tests,
+        }
 
     def get_crash_autopsy(self, db_path: str = ".blackbox/wal.sqlite") -> str:
         """Compiles and returns .blackbox.md autopsy markdown from WAL database."""
@@ -463,7 +539,8 @@ class BlackboxMCPServer:
                 "compare_execution_runs",
                 "get_repair_prompt",
                 "create_crash_bundle",
-                "inspect_crash_bundle"
+                "inspect_crash_bundle",
+                "get_full_incident_context"
             ]
 
             tool_list = [

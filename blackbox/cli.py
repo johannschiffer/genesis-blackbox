@@ -41,6 +41,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Subcommand: record
     rec_parser = subparsers.add_parser("record", help="Execute command or record event into flight recorder")
     rec_parser.add_argument("--db", default=".blackbox/wal.sqlite", help="Path to WAL ring-buffer database")
+    rec_parser.add_argument("--no-auto-baseline", action="store_true", default=False, help="Disable automatic promotion of clean runs to baseline WAL")
     rec_parser.add_argument("--type", help="Manual event type (HTTP_REQ, SQL_QUERY, LOG, etc.)")
     rec_parser.add_argument("--payload", help="JSON payload string for manual recording")
     rec_parser.add_argument("--source", default="cli", help="Source identifier")
@@ -126,6 +127,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     bundle_inspect_parser.add_argument("zip_path", help="Path to crash bundle .zip file")
     bundle_inspect_parser.add_argument("--json", action="store_true", help="Output machine-readable JSON")
 
+    # Subcommand: watch
+    watch_parser = subparsers.add_parser("watch", help="Watch source files and surgically run impacted tests with Blackbox capture")
+    watch_parser.add_argument("--root", default=".", help="Project root directory to monitor (default: .)")
+    watch_parser.add_argument("--interval", type=float, default=1.0, help="Polling interval in seconds (default: 1.0)")
+    watch_parser.add_argument("--once", action="store_true", help="Execute a single surgical poll cycle and exit")
+    watch_parser.add_argument("--db", default=".blackbox/wal.sqlite", help="Path to WAL database (default: .blackbox/wal.sqlite)")
+    watch_parser.add_argument("--no-auto-baseline", action="store_true", default=False, help="Disable automatic baseline promotion on passing runs")
+
     args = parser.parse_args(argv)
 
 
@@ -137,7 +146,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         # Case 1: Target command execution
         if cmd:
-            return run_target(cmd, db_path=args.db)
+            return run_target(cmd, db_path=args.db, auto_baseline=not args.no_auto_baseline)
 
         # Case 2: Manual event payload recording
         if args.type and args.payload:
@@ -387,6 +396,32 @@ def main(argv: Optional[List[str]] = None) -> int:
                     for c in res.get("corrupted_files", []):
                         print(f"- Corrupted: {c.get('file')} ({c.get('error')})", file=sys.stderr)
             return 0 if res["valid"] else 1
+
+    elif args.command == "watch":
+        from .recorder.watcher import SurgicalWatcher
+        watcher = SurgicalWatcher(
+            root_dir=args.root,
+            db_path=args.db,
+            interval=args.interval,
+            auto_baseline=not args.no_auto_baseline,
+        )
+        if args.once:
+            res = watcher.run_once()
+            if not res["changed_files"]:
+                print("[Genesis-Blackbox] Watch cycle: no source modifications detected.")
+                return 0
+            print(f"[Genesis-Blackbox] Watch cycle: {len(res['changed_files'])} changed file(s), {len(res['impacted_tests'])} impacted test(s).")
+            if not res["executed"]:
+                return 0
+            if res["passed"]:
+                print("[Genesis-Blackbox] Impacted tests PASSED." + (" Baseline promoted." if res["baseline_promoted"] else ""))
+                return 0
+            print(f"[Genesis-Blackbox] Impacted tests FAILED. Autopsy: {res.get('autopsy_path')}", file=sys.stderr)
+            return 1
+
+        print(f"[Genesis-Blackbox] Watching {watcher.root_dir} (interval={watcher.interval}s)...")
+        watcher.watch()
+        return 0
 
     return 0
 

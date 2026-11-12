@@ -9,9 +9,11 @@ import runpy
 import shutil
 import tempfile
 import subprocess
+from typing import Optional
 from .wal_ring import WalRingBuffer
 from .exception_hook import ExceptionHook
 from .process_hook import SubprocessInterceptor
+from .baseline import BaselineManager
 
 
 _BOOTSTRAP_SITECUSTOMIZE = """import atexit
@@ -54,13 +56,62 @@ if _spec and _spec.loader and _spec.origin != __file__:
 """
 
 
-def run_target(cmd_args, db_path: str = ".blackbox/wal.sqlite") -> int:
+def _finalize_run_baseline(
+    exit_code: int,
+    db_path: str,
+    auto_baseline: bool,
+    baseline_path: Optional[str],
+    autopsy_path: Optional[str],
+    start_event_id: int,
+) -> None:
+    """Promotes clean runs to baseline or writes divergence artifacts when a baseline exists."""
+    if not db_path or db_path == ":memory:":
+        return
+    target_baseline = baseline_path or BaselineManager.default_baseline_path(db_path)
+    if exit_code == 0:
+        if auto_baseline:
+            BaselineManager.promote_to_baseline(
+                wal_path=db_path,
+                baseline_path=target_baseline,
+                since_event_id=start_event_id,
+            )
+        return
+
+    if os.path.isfile(target_baseline):
+        proj_dir = BaselineManager.default_project_dir(db_path)
+        target_autopsy = autopsy_path or os.path.join(proj_dir, ".blackbox.md")
+        try:
+            from ..compiler.autopsy import CausalCrashCompiler
+            with WalRingBuffer(db_path=db_path) as ring:
+                compiler = CausalCrashCompiler(wal_ring=ring)
+                capsule = compiler.compile()
+            os.makedirs(os.path.dirname(os.path.abspath(target_autopsy)) or ".", exist_ok=True)
+            with open(target_autopsy, "w", encoding="utf-8") as f_aut:
+                f_aut.write(capsule)
+        except Exception:
+            pass
+        BaselineManager.write_baseline_divergence(
+            wal_path=db_path,
+            baseline_path=target_baseline,
+            autopsy_path=target_autopsy,
+        )
+
+
+def run_target(
+    cmd_args,
+    db_path: str = ".blackbox/wal.sqlite",
+    auto_baseline: bool = True,
+    baseline_path: Optional[str] = None,
+    autopsy_path: Optional[str] = None,
+) -> int:
     """Executes target script or command with automatic Blackbox flight recorder attached."""
     if not cmd_args:
         print("[Genesis-Blackbox] Error: No target command provided.", file=sys.stderr)
         return 1
 
     ring = WalRingBuffer(db_path=db_path)
+    prev = ring.query_recent(limit=1)
+    start_event_id = prev[0]["id"] if prev else 0
     target = cmd_args[0]
 
     if target.endswith(".py") and os.path.isfile(target):
@@ -70,26 +121,39 @@ def run_target(cmd_args, db_path: str = ".blackbox/wal.sqlite") -> int:
         orig_argv = sys.argv[:]
         sys.argv = list(cmd_args)
         ring.record(event_type="PROCESS_START", payload={"script": target, "argv": cmd_args}, source="blackbox_runner")
+        exit_code = 1
         try:
             runpy.run_path(target, run_name="__main__")
             ring.record(event_type="PROCESS_EXIT", payload={"script": target, "exit_code": 0}, source="blackbox_runner")
+            exit_code = 0
             return 0
         except SystemExit as se:
             code = se.code if isinstance(se.code, int) else (0 if se.code is None else 1)
             ring.record(event_type="PROCESS_EXIT", payload={"script": target, "exit_code": code}, source="blackbox_runner")
+            exit_code = code
             return code
         except BaseException as exc:
             hook.handle_exception(type(exc), exc, exc.__traceback__)
             ring.record(event_type="PROCESS_EXIT", payload={"script": target, "exit_code": 1}, source="blackbox_runner", status="error")
+            exit_code = 1
             raise
         finally:
             sys.argv = orig_argv
             hook.uninstall()
             SubprocessInterceptor.uninstall()
             ring.close()
+            _finalize_run_baseline(
+                exit_code=exit_code,
+                db_path=db_path,
+                auto_baseline=auto_baseline,
+                baseline_path=baseline_path,
+                autopsy_path=autopsy_path,
+                start_event_id=start_event_id,
+            )
 
     bootstrap_dir = tempfile.mkdtemp(prefix="blackbox_boot_")
     spool_path = None
+    exit_code = 1
     try:
         site_path = os.path.join(bootstrap_dir, "sitecustomize.py")
         with open(site_path, "w", encoding="utf-8") as f_boot:
@@ -154,6 +218,7 @@ def run_target(cmd_args, db_path: str = ".blackbox/wal.sqlite") -> int:
                     source="blackbox_runner",
                     status=status
                 )
+                exit_code = proc.returncode
                 return proc.returncode
             else:
                 proc = subprocess.run(cmd_args, env=env)
@@ -164,6 +229,7 @@ def run_target(cmd_args, db_path: str = ".blackbox/wal.sqlite") -> int:
                     source="blackbox_runner",
                     status="ok" if proc.returncode == 0 else "error"
                 )
+                exit_code = proc.returncode
                 return proc.returncode
         except Exception as e:
             ring.record(
@@ -173,6 +239,7 @@ def run_target(cmd_args, db_path: str = ".blackbox/wal.sqlite") -> int:
                 status="error"
             )
             print(f"[Genesis-Blackbox] Execution failed: {e}", file=sys.stderr)
+            exit_code = 1
             return 1
     finally:
         try:
@@ -182,3 +249,11 @@ def run_target(cmd_args, db_path: str = ".blackbox/wal.sqlite") -> int:
             pass
         ring.close()
         shutil.rmtree(bootstrap_dir, ignore_errors=True)
+        _finalize_run_baseline(
+            exit_code=exit_code,
+            db_path=db_path,
+            auto_baseline=auto_baseline,
+            baseline_path=baseline_path,
+            autopsy_path=autopsy_path,
+            start_event_id=start_event_id,
+        )

@@ -2,7 +2,7 @@
 Genesis Blackbox: Flight Recorder & AST Blast-Radius Causal Crash Compiler.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 __author__ = "Johann Schiffer / Project Genesis"
 __license__ = "MIT"
 
@@ -11,6 +11,8 @@ from .recorder.exception_hook import ExceptionHook, SafeSerializer, install_exce
 from .recorder.http_interceptor import BlackboxASGIMiddleware, BlackboxWSGIMiddleware, HttpTraceContext
 from .recorder.sql_interceptor import TracedConnection, TracedCursor, SqlInterceptor, SqlTraceContext
 from .recorder.process_hook import SubprocessInterceptor
+from .recorder.baseline import BaselineManager
+from .recorder.watcher import SurgicalWatcher
 from .instrumentation import auto_instrument
 from .integrations import instrument_fastapi, instrument_flask, instrument_engine
 from .ast_engine.graph import CodebaseGraph
@@ -40,6 +42,8 @@ __all__ = [
     "SqlInterceptor",
     "SqlTraceContext",
     "SubprocessInterceptor",
+    "BaselineManager",
+    "SurgicalWatcher",
     "auto_instrument",
     "instrument_fastapi",
     "instrument_flask",

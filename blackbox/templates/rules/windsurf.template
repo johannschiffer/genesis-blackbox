@@ -1,6 +1,10 @@
-# Genesis Blackbox v0.2.0 Integration Directives for Windsurf / Cascade
+# Genesis Blackbox v0.4.0 Integration Directives for Windsurf / Cascade
 
-When resolving runtime exceptions or investigating regressions, execute the complete Genesis Blackbox v0.2.0 autonomous workflow:
+When resolving runtime exceptions or investigating regressions, execute the complete Genesis Blackbox v0.4.0 autonomous workflow:
+
+0. **1-Call Context, Pytest & Surgical Watch:**
+   - Call MCP `get_full_incident_context` to fetch autopsy, baseline diff, reproduction test, and impacted tests in one call.
+   - Run `pytest --blackbox` or `blackbox watch` for automatic clean baseline rotation (`.blackbox/wal.baseline.sqlite`, opt-out via `--no-auto-baseline`) and automatic `.blackbox-diff.md` divergence reporting on crash.
 
 1. **Autopsy & Time-Travel Diff:**
    - Execute `blackbox autopsy` (or MCP `get_crash_autopsy`) to inspect root-cause frames, local variables, and timeline.

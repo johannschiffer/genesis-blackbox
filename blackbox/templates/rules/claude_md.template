@@ -1,9 +1,10 @@
-# Genesis Blackbox v0.2.0 Protocol for Claude
+# Genesis Blackbox v0.4.0 Protocol for Claude
 
-When diagnosing runtime errors, investigating regressions, or repairing crashes in this project, follow the mandatory Genesis Blackbox v0.2.0 autonomous repair loop using native MCP tools or CLI commands:
+When diagnosing runtime errors, investigating regressions, or repairing crashes in this project, follow the mandatory Genesis Blackbox v0.4.0 autonomous repair loop using native MCP tools or CLI commands:
 
 ## Available MCP Tools
 
+- `get_full_incident_context`: 1-call unified payload returning `autopsy_markdown`, `baseline_diff` (from `.blackbox/wal.baseline.sqlite`), `reproduction_test`, and AST `impacted_tests`.
 - `get_crash_autopsy`: Compiles `.blackbox.md` deterministic autopsy from the circular SQLite WAL log.
 - `compare_execution_runs`: Compares baseline healthy execution run against latest failing run, pinpointing exact SQL, HTTP schema, and variable divergence.
 - `get_blast_radius`: Analyzes upstream callers and downstream dependencies for modified symbols in Python (`.py`) and TypeScript/JavaScript (`.ts`, `.tsx`, `.js`).
@@ -15,6 +16,11 @@ When diagnosing runtime errors, investigating regressions, or repairing crashes 
 - `inspect_crash_bundle`: Verifies integrity of a shareable crash bundle without extracting to disk.
 - `query_execution_timeline`: Inspects the sequence of HTTP requests, SQL queries, and subprocess invocations leading to the crash.
 - `record_event`: Records custom diagnostic checkpoints into the circular WAL log.
+
+## Continuous Recording & Auto-Baseline Rotation
+
+- Run `pytest --blackbox` to capture test failures and automatically promote clean sessions (`exitstatus == 0`) to `.blackbox/wal.baseline.sqlite` (disable with `--no-auto-baseline`). Subsequent failures automatically write `.blackbox-diff.md` and append `## Automatic Baseline Divergence` to `.blackbox.md`.
+- Run `blackbox watch [--root .] [--interval 1.0] [--once]` to monitor source edits and surgically run only AST-impacted tests.
 
 ## Mandatory Autonomous Loop
 

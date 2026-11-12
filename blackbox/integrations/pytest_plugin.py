@@ -19,6 +19,7 @@ from ..ast_engine.graph import CodebaseGraph
 from ..ci.github_summary import export_github_step_summary
 from ..compiler.autopsy import CausalCrashCompiler
 from ..compiler.reproducer import CrashReproducer
+from ..recorder.baseline import BaselineManager
 from ..recorder.exception_hook import ExceptionHook, install_exception_hook, uninstall_exception_hook
 from ..recorder.process_hook import SubprocessInterceptor
 from ..recorder.wal_ring import WalRingBuffer
@@ -59,6 +60,20 @@ def pytest_addoption(parser, pluginmanager=None):
         dest="blackbox_db",
         help="Path to circular SQLite WAL ring-buffer database (default: .blackbox/wal.sqlite)."
     )
+    group.addoption(
+        "--blackbox-baseline",
+        action="store",
+        default=None,
+        dest="blackbox_baseline",
+        help="Path to sanitized baseline WAL SQLite snapshot (default: sibling *.baseline.sqlite)."
+    )
+    group.addoption(
+        "--no-auto-baseline",
+        action="store_true",
+        default=False,
+        dest="blackbox_no_auto_baseline",
+        help="Disable automatic baseline WAL promotion when the pytest session passes cleanly."
+    )
 
 
 def pytest_configure(config):
@@ -71,8 +86,15 @@ def pytest_configure(config):
         return
 
     db_path = config.getoption("blackbox_db", ".blackbox/wal.sqlite")
+    baseline_path = config.getoption("blackbox_baseline", None) or BaselineManager.default_baseline_path(db_path)
     wal_ring = WalRingBuffer(db_path=db_path)
+    prev = wal_ring.query_recent(limit=1)
     config._blackbox_wal = wal_ring
+    config._blackbox_db_path = db_path
+    config._blackbox_baseline_path = baseline_path
+    config._blackbox_start_event_id = prev[0]["id"] if prev else 0
+    config._blackbox_session_failed = False
+    config._blackbox_exitstatus = None
 
     # Install subprocess execution interceptor
     SubprocessInterceptor.install_global(wal_ring=wal_ring)
@@ -81,8 +103,14 @@ def pytest_configure(config):
     install_exception_hook(wal_ring=wal_ring)
 
 
+def pytest_sessionfinish(session, exitstatus):
+    """Captures the pytest session exitstatus for automatic baseline promotion."""
+    if hasattr(session.config, "_blackbox_wal"):
+        session.config._blackbox_exitstatus = exitstatus
+
+
 def pytest_unconfigure(config):
-    """Restores global runtime hooks and closes WAL connection upon test session completion."""
+    """Restores global runtime hooks, closes WAL, and promotes clean baseline if applicable."""
     if hasattr(config, "_blackbox_wal"):
         uninstall_exception_hook()
         SubprocessInterceptor.uninstall()
@@ -91,6 +119,19 @@ def pytest_unconfigure(config):
         except Exception:
             pass
         delattr(config, "_blackbox_wal")
+
+        exitstatus = getattr(config, "_blackbox_exitstatus", None)
+        no_auto = config.getoption("blackbox_no_auto_baseline", False)
+        failed = getattr(config, "_blackbox_session_failed", False)
+        db_path = getattr(config, "_blackbox_db_path", ".blackbox/wal.sqlite")
+        baseline_path = getattr(config, "_blackbox_baseline_path", BaselineManager.default_baseline_path(db_path))
+        start_eid = getattr(config, "_blackbox_start_event_id", 0)
+        if exitstatus == 0 and not no_auto and not failed:
+            BaselineManager.promote_to_baseline(
+                wal_path=db_path,
+                baseline_path=baseline_path,
+                since_event_id=start_eid,
+            )
     if hasattr(config, "_blackbox_graph"):
         delattr(config, "_blackbox_graph")
 
@@ -148,6 +189,7 @@ def pytest_runtest_makereport(item, call):
 
     # Process failure during test execution or setup phase
     if report.failed:
+        config._blackbox_session_failed = True
         exc_type = None
         exc_value = None
         tb = None
@@ -202,6 +244,16 @@ def pytest_runtest_makereport(item, call):
                 f.write(capsule)
         except Exception:
             pass
+
+        # 2b. If a sanitized baseline exists, compute .blackbox-diff.md and append divergence section
+        db_path = getattr(config, "_blackbox_db_path", config.getoption("blackbox_db", ".blackbox/wal.sqlite"))
+        baseline_path = getattr(config, "_blackbox_baseline_path", BaselineManager.default_baseline_path(db_path))
+        if baseline_path and os.path.isfile(baseline_path):
+            BaselineManager.write_baseline_divergence(
+                wal_path=db_path,
+                baseline_path=baseline_path,
+                autopsy_path=output_path,
+            )
 
         # 3. Generate reproduction test script
         reproducer = CrashReproducer(wal_ring=wal_ring)

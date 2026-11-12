@@ -523,6 +523,7 @@ def test_mcp_tools_list_exposes_all_tools(tmp_path: Path):
             "test_candidate_patch", "get_blast_radius", "query_execution_timeline",
             "record_event", "compare_execution_runs", "get_repair_prompt",
             "create_crash_bundle", "inspect_crash_bundle",
+            "get_full_incident_context",
         }
     finally:
         server.close()

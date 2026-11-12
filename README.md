@@ -23,8 +23,9 @@ When coding agents (Claude Code, Cursor, Windsurf, Antigravity) encounter runtim
 6. **Zero-Config & Framework Instrumentation (`instrumentation.py`, `integrations/`):** Drop-in `auto_instrument()` plus idiomatic adapters for FastAPI/Starlette (ASGI), Flask (WSGI), sqlite3/DB-API, and SQLAlchemy.
 7. **AST Blast-Radius & Impact Selector (`ast_engine/`):** Static call-graph analyzer that computes upstream callers, downstream callees, and impacted test suites (`pytest` or `node --test`) for modified code.
 8. **Causal Crash Compiler, Reproducer & Patch Validator (`compiler/`):** Compiles `.blackbox.md` autopsy capsules, synthesizes standalone Python (`pytest`) or Node.js (`node:test`) reproduction scripts, validates candidate `git diff` patches with guaranteed rollback, and writes `.blackbox-resolved.md` verification receipts.
-9. **Pytest Plugin & GitHub Actions Summary (`pytest_plugin.py`, `ci/`):** Native `pytest --blackbox` hook and collapsible `$GITHUB_STEP_SUMMARY` Markdown exporter.
-10. **Native MCP Server & Live SSE Web Inspector (`mcp_server.py`, `ui/`):** Stdio MCP server (`blackbox-mcp`) exposing 11 diagnostic tools alongside a localhost timeline viewer with live Server-Sent Events (SSE) streaming (`GET /api/live`).
+9. **Pytest Plugin, Auto-Baseline Rotation & GitHub Actions Summary (`pytest_plugin.py`, `baseline.py`, `ci/`):** Native `pytest --blackbox` hook with atomic clean-run baseline promotion (`.blackbox/wal.baseline.sqlite`, opt-out via `--no-auto-baseline`), automatic `.blackbox-diff.md` divergence generation on failure, and collapsible `$GITHUB_STEP_SUMMARY` Markdown exporter.
+10. **Surgical Watch Mode (`watcher.py`):** Zero-dependency `os.stat` source watcher (`blackbox watch`) that selects and runs only AST-impacted tests on edits, rotating baselines on pass and compiling crash artifacts on failure.
+11. **Native MCP Server & Live SSE Web Inspector (`mcp_server.py`, `ui/`):** Stdio MCP server (`blackbox-mcp`) exposing 12 diagnostic tools (including 1-call `get_full_incident_context`) alongside a localhost timeline viewer with live Server-Sent Events (SSE) streaming (`GET /api/live`).
 
 ---
 
@@ -87,12 +88,18 @@ instrument_flask(flask_app)
 instrument_engine(sqlalchemy_engine)
 ```
 
-### 3. Pytest Plugin & Impact Test Selection
+### 3. Pytest Plugin, Auto-Baseline & Surgical Watch Mode
 
-Capture autopsies and standalone reproduction scripts automatically on test failures:
+Capture autopsies, standalone reproduction scripts, and automatic clean-run baseline snapshots (`wal.baseline.sqlite`):
 
 ```bash
-pytest --blackbox
+pytest --blackbox [--no-auto-baseline]
+```
+
+Monitor source files and surgically run only impacted tests on modification:
+
+```bash
+blackbox watch [--root .] [--interval 1.0] [--once]
 ```
 
 Select and execute only the tests affected by modified source symbols:
@@ -163,8 +170,9 @@ python examples/03_autonomous_patch_loop/run_demo.py
 
 ## MCP Server Configuration
 
-`genesis-blackbox` ships the `blackbox-mcp` stdio server exposing 11 diagnostic and repair tools:
+`genesis-blackbox` ships the `blackbox-mcp` stdio server exposing 12 diagnostic and repair tools:
 
+- `get_full_incident_context`: 1-call unified payload returning `autopsy_markdown`, `baseline_diff`, `reproduction_test`, and `impacted_tests`.
 - `get_crash_autopsy`: Compiles `.blackbox.md` from recorded WAL events.
 - `compare_execution_runs`: Compares baseline passing run against failing run to pinpoint SQL, HTTP, and variable divergence.
 - `get_blast_radius`: Computes upstream callers and downstream callees across Python and TypeScript/JavaScript.

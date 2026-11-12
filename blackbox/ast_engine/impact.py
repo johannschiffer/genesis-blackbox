@@ -134,6 +134,14 @@ class ImpactTestSelector:
                     test_files.append(os.path.normpath(os.path.join(root, f)))
         return sorted(test_files)
 
+    def select_tests_for_files(
+        self,
+        changed_files: List[str],
+        tests_dir: Optional[str] = None,
+    ) -> List[str]:
+        """Selects test files impacted by the provided list of modified source files."""
+        return self.find_impacted_tests(files=changed_files, diff=False, tests_dir=tests_dir)
+
     def find_impacted_tests(
         self,
         files: Optional[List[str]] = None,

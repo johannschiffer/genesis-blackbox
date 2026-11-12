@@ -211,29 +211,18 @@ class StateDiffer:
 
         return baseline_run, failing_run
 
-    def diff(
+    def _compute_diff_from_runs(
         self,
-        baseline_run_id: Optional[str] = None,
-        failing_run_id: Optional[str] = None
+        baseline_run: Dict[str, Any],
+        failing_run: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """
-        Performs deep deterministic state diff between baseline run and failing run.
-        """
-        baseline_run, failing_run = self.resolve_runs(baseline_run_id, failing_run_id)
-
+        """Computes deterministic alignment, SQL, HTTP, and variable diffs between two run objects."""
         b_events = baseline_run["events"]
         f_events = failing_run["events"]
 
-        # Step 1: Sequence Alignment Diff
         alignment_diff, divergence_point = self._align_and_find_divergence(b_events, f_events)
-
-        # Step 2: SQL Query Diff
         sql_diff = self._diff_sql_events(b_events, f_events)
-
-        # Step 3: HTTP Transaction Diff
         http_diff = self._diff_http_events(b_events, f_events)
-
-        # Step 4: Variable State Diff
         variable_diff = self._diff_variables_and_exception(baseline_run, failing_run)
 
         return {
@@ -255,6 +244,54 @@ class StateDiffer:
             "http_diff": http_diff,
             "variable_diff": variable_diff
         }
+
+    def diff(
+        self,
+        baseline_run_id: Optional[str] = None,
+        failing_run_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Performs deep deterministic state diff between baseline run and failing run.
+        """
+        baseline_run, failing_run = self.resolve_runs(baseline_run_id, failing_run_id)
+        return self._compute_diff_from_runs(baseline_run, failing_run)
+
+    def diff_against_baseline(self, baseline_db_path: str) -> Dict[str, Any]:
+        """
+        Compares the latest passing run in an external baseline WAL database against
+        the latest failing run (or current timeline) in this StateDiffer's WAL database.
+        """
+        if not baseline_db_path or not os.path.isfile(baseline_db_path):
+            raise ValueError(f"Baseline WAL database not found: {baseline_db_path}")
+
+        baseline_differ = StateDiffer(db_path=baseline_db_path)
+        try:
+            b_runs = baseline_differ.extract_runs()
+        finally:
+            baseline_differ.close()
+
+        baseline_run = None
+        for r in reversed(b_runs):
+            if r["status"] == "passing":
+                baseline_run = r
+                break
+        if baseline_run is None and b_runs:
+            baseline_run = b_runs[-1]
+        if baseline_run is None:
+            raise ValueError("Could not find a baseline PASSING execution run in baseline WAL.")
+
+        f_runs = self.extract_runs()
+        failing_run = None
+        for r in reversed(f_runs):
+            if r["status"] == "failing":
+                failing_run = r
+                break
+        if failing_run is None and f_runs:
+            failing_run = f_runs[-1]
+        if failing_run is None:
+            raise ValueError("Could not find a FAILING execution run in WAL.")
+
+        return self._compute_diff_from_runs(baseline_run, failing_run)
 
     def compare_runs(
         self,

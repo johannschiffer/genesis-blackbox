@@ -177,9 +177,13 @@ def test_wal_ring_close_prunes_excess_records_below_batch_threshold(tmp_path: Pa
 
 
 def test_version_030_alignment(tmp_path: Path):
-    assert blackbox.__version__ == "0.3.0"
+    import tomllib
+    pyproject_path = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    with open(pyproject_path, "rb") as f:
+        project_version = tomllib.load(f)["project"]["version"]
+    assert blackbox.__version__ == project_version
     server = BlackboxMCPServer(db_path=str(tmp_path / "mcp.sqlite"))
     try:
-        assert server.version == "0.3.0"
+        assert server.version == blackbox.__version__
     finally:
         server.close()
