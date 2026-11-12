@@ -343,6 +343,35 @@ class BlackboxMCPServer:
                     baseline_db_path=args.get("baseline_db_path", ".blackbox/wal.baseline.sqlite"),
                     n_plus_one_threshold=int(args.get("n_plus_one_threshold", 5))
                 )
+            },
+            "get_autonomous_heal_plan": {
+                "name": "get_autonomous_heal_plan",
+                "description": "Synthesizes a deterministic 4-step autonomous repair plan combining root cause, offline HTTP egress stubs, performance/resource alerts, baseline diff, and AST-impacted tests.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "db_path": {
+                            "type": "string",
+                            "description": "Path to WAL SQLite database (default: .blackbox/wal.sqlite)",
+                            "default": ".blackbox/wal.sqlite"
+                        },
+                        "baseline_db_path": {
+                            "type": "string",
+                            "description": "Path to baseline WAL SQLite database (default: .blackbox/wal.baseline.sqlite)",
+                            "default": ".blackbox/wal.baseline.sqlite"
+                        },
+                        "root_dir": {
+                            "type": "string",
+                            "description": "Project root directory for AST impact discovery (default: .)",
+                            "default": "."
+                        }
+                    }
+                },
+                "handler": lambda args: self.get_autonomous_heal_plan(
+                    db_path=args.get("db_path", self.default_db_path),
+                    baseline_db_path=args.get("baseline_db_path", ".blackbox/wal.baseline.sqlite"),
+                    root_dir=args.get("root_dir", ".")
+                )
             }
         }
         self.tools["blackbox_get_crash_autopsy"] = self.tools["get_crash_autopsy"]
@@ -358,6 +387,7 @@ class BlackboxMCPServer:
         self.tools["blackbox_inspect_crash_bundle"] = self.tools["inspect_crash_bundle"]
         self.tools["blackbox_get_full_incident_context"] = self.tools["get_full_incident_context"]
         self.tools["blackbox_diagnose_performance_and_flakiness"] = self.tools["diagnose_performance_and_flakiness"]
+        self.tools["blackbox_get_autonomous_heal_plan"] = self.tools["get_autonomous_heal_plan"]
 
     def generate_reproduction_test(self, db_path: str = ".blackbox/wal.sqlite") -> str:
         """Synthesizes and returns standalone Python reproduction test script from WAL database."""
@@ -444,6 +474,7 @@ class BlackboxMCPServer:
         """Returns autopsy markdown, baseline diff, reproduction test, and impacted tests in one call."""
         from .ast_engine.impact import ImpactTestSelector
         from .compiler.state_differ import StateDiffer
+        from .recorder.egress_mocker import EgressMocker
 
         with self._resolve_ring(db_path) as ring:
             compiler = CausalCrashCompiler(wal_ring=ring, ast_graph=self.ast_graph)
@@ -461,12 +492,27 @@ class BlackboxMCPServer:
                     baseline_diff = None
 
             target_files: List[str] = []
+            crash_trace_id: Optional[str] = None
             exc_events = ring.query_recent(limit=1, event_type="EXCEPTION")
             if exc_events:
-                rc = (exc_events[0].get("payload") or {}).get("root_cause") or {}
+                exc_payload = exc_events[0].get("payload") or {}
+                rc = exc_payload.get("root_cause") or {}
+                crash_trace_id = (
+                    exc_events[0].get("trace_id")
+                    or exc_payload.get("trace_id")
+                    or rc.get("trace_id")
+                )
                 culprit = rc.get("filename")
                 if culprit and os.path.isfile(culprit):
                     target_files.append(culprit)
+
+            recent_events = ring.query_recent(limit=200)
+            egress_stubs = EgressMocker.extract_egress_stubs(recent_events, trace_id=crash_trace_id)
+            resource_profile: Optional[Dict[str, Any]] = None
+            for ev in recent_events:
+                if ev.get("event_type") == "RESOURCE_PROFILE" and isinstance(ev.get("payload"), dict):
+                    resource_profile = dict(ev["payload"])
+                    break
 
         selector = ImpactTestSelector(root_dir=root_dir)
         impacted_tests = selector.find_impacted_tests(
@@ -485,6 +531,8 @@ class BlackboxMCPServer:
             "reproduction_test": reproduction_test,
             "impacted_tests": impacted_tests,
             "performance_and_flakiness": performance_and_flakiness,
+            "egress_stubs": egress_stubs,
+            "resource_profile": resource_profile,
         }
 
     def diagnose_performance_and_flakiness(
@@ -500,6 +548,21 @@ class BlackboxMCPServer:
             wal_path=db_path,
             baseline_path=baseline_db_path,
             n_plus_one_threshold=n_plus_one_threshold,
+        )
+
+    def get_autonomous_heal_plan(
+        self,
+        db_path: str = ".blackbox/wal.sqlite",
+        baseline_db_path: str = ".blackbox/wal.baseline.sqlite",
+        root_dir: str = ".",
+    ) -> Dict[str, Any]:
+        """Builds a deterministic step-by-step autonomous heal plan combining all WAL telemetry."""
+        from .compiler.heal_planner import AutonomousHealPlanner
+        planner = AutonomousHealPlanner()
+        return planner.build_heal_plan(
+            wal_path=db_path,
+            baseline_path=baseline_db_path,
+            root_dir=root_dir,
         )
 
     def get_crash_autopsy(self, db_path: str = ".blackbox/wal.sqlite") -> str:
@@ -592,7 +655,8 @@ class BlackboxMCPServer:
                 "create_crash_bundle",
                 "inspect_crash_bundle",
                 "get_full_incident_context",
-                "diagnose_performance_and_flakiness"
+                "diagnose_performance_and_flakiness",
+                "get_autonomous_heal_plan"
             ]
 
             tool_list = [

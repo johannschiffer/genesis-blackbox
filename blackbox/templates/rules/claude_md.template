@@ -1,10 +1,11 @@
-# Genesis Blackbox v0.5.0 Protocol for Claude
+# Genesis Blackbox v0.6.0 Protocol for Claude
 
-When diagnosing runtime errors, investigating regressions, or repairing crashes in this project, follow the mandatory Genesis Blackbox v0.5.0 autonomous repair loop using native MCP tools or CLI commands:
+When diagnosing runtime errors, investigating regressions, or repairing crashes in this project, follow the mandatory Genesis Blackbox v0.6.0 autonomous repair loop using native MCP tools or CLI commands:
 
 ## Available MCP Tools
 
-- `get_full_incident_context`: 1-call unified payload returning `autopsy_markdown`, `baseline_diff` (from `.blackbox/wal.baseline.sqlite`), `reproduction_test`, AST `impacted_tests`, and `performance_and_flakiness`.
+- `get_full_incident_context`: 1-call unified payload returning `autopsy_markdown`, `baseline_diff` (from `.blackbox/wal.baseline.sqlite`), `reproduction_test`, AST `impacted_tests`, `performance_and_flakiness`, `egress_stubs`, and `resource_profile`.
+- `get_autonomous_heal_plan`: Returns a deterministic 4-phase autonomous remediation plan (`blackbox heal-plan`) combining root cause, offline `EgressMocker` HTTP stubs, memory/perf alerts, baseline diff, and impacted tests.
 - `diagnose_performance_and_flakiness`: Detects N+1 SQL query loops, latency regressions vs baseline, and flaky test causes (`blackbox diagnose-perf`).
 - `get_crash_autopsy`: Compiles `.blackbox.md` deterministic autopsy from the circular SQLite WAL log.
 - `compare_execution_runs`: Compares baseline healthy execution run against latest failing run, pinpointing exact SQL, HTTP schema, and variable divergence.

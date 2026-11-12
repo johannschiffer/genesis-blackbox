@@ -308,7 +308,7 @@ def test_mcp_diagnose_perf_and_full_incident_context_enrichment(tmp_path: Path):
     try:
         tools_resp = server.handle_request({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         tool_names = [t["name"] for t in tools_resp["result"]["tools"]]
-        assert len(tool_names) == 13
+        assert len(tool_names) == 14
         assert "diagnose_performance_and_flakiness" in tool_names
 
         perf_resp = server.handle_request({

@@ -10,6 +10,7 @@ import json
 import math
 import inspect
 from typing import Dict, Any, List, Optional
+from ..recorder.egress_mocker import EgressMocker
 from ..recorder.wal_ring import WalRingBuffer
 
 
@@ -218,8 +219,15 @@ class CrashReproducer:
         locals_dict = root_cause.get("locals") or {}
 
         # Fetch preceding SQL, HTTP, and SUBPROCESS events
-        recent_events = self.wal_ring.query_recent(limit=15)
+        recent_events = self.wal_ring.query_recent(limit=50)
         sub_events = [e for e in recent_events if e.get("event_type") in ("SUBPROCESS", "subprocess")]
+        crash_trace_id = (
+            exc_event.get("trace_id")
+            or payload.get("trace_id")
+            or root_cause.get("trace_id")
+        )
+        egress_stubs = EgressMocker.extract_egress_stubs(recent_events, trace_id=crash_trace_id)
+        egress_mock_block = EgressMocker.synthesize_python_mock_block(egress_stubs) if egress_stubs else ""
 
         # Filter local variables (remove dunders and private variables)
         clean_locals = {}
@@ -296,6 +304,13 @@ class CrashReproducer:
             "    return result",
             "",
             "",
+        ]
+
+        if egress_mock_block:
+            lines.extend(egress_mock_block.rstrip().splitlines())
+            lines.extend(["", ""])
+
+        lines.extend([
             "def test_reproduce_and_verify_fix():",
             '    """',
             f'    Reproduces crash scenario: {safe_doc_type}: {safe_doc_msg}.',
@@ -306,7 +321,7 @@ class CrashReproducer:
             "",
             "    # Reconstructed input arguments captured from frame locals",
             "    reconstructed_args = {",
-        ]
+        ])
 
         for k, v in clean_locals.items():
             lines.append(f'        {repr(str(k))}: {_safe_repr(v)},')
@@ -317,7 +332,20 @@ class CrashReproducer:
             "    # Setup mocks for external side effects if necessary",
         ])
 
-        if sub_events:
+        if egress_stubs and sub_events:
+            lines.extend([
+                "    # Offline HTTP egress stubs and subprocess mocks detected in execution timeline",
+                "    with _blackbox_mock_egress(), patch('subprocess.run') as mock_sub_run:",
+                "        mock_sub_run.return_value = MagicMock(returncode=0, stdout='ok', stderr='')",
+                "        result = _invoke(target_func, reconstructed_args)",
+            ])
+        elif egress_stubs:
+            lines.extend([
+                "    # Offline HTTP egress stubs synthesized from WAL HTTP_CLIENT events",
+                "    with _blackbox_mock_egress():",
+                "        result = _invoke(target_func, reconstructed_args)",
+            ])
+        elif sub_events:
             lines.extend([
                 "    # Subprocess interactions detected in execution timeline",
                 "    with patch('subprocess.run') as mock_sub_run:",

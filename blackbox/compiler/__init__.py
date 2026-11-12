@@ -6,6 +6,7 @@ from .state_differ import StateDiffer
 from .prompt_synth import PromptSynthesizer
 from .perf_detector import PerformanceDetector
 from .flake_analyzer import FlakeAnalyzer
+from .heal_planner import AutonomousHealPlanner
 
 __all__ = [
     "CausalCrashCompiler",
@@ -16,6 +17,7 @@ __all__ = [
     "PromptSynthesizer",
     "PerformanceDetector",
     "FlakeAnalyzer",
+    "AutonomousHealPlanner",
 ]
 
 

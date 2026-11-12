@@ -525,6 +525,7 @@ def test_mcp_tools_list_exposes_all_tools(tmp_path: Path):
             "create_crash_bundle", "inspect_crash_bundle",
             "get_full_incident_context",
             "diagnose_performance_and_flakiness",
+            "get_autonomous_heal_plan",
         }
     finally:
         server.close()

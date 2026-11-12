@@ -22,10 +22,14 @@ class CausalCrashCompiler:
     def __init__(
         self,
         wal_ring: Optional[WalRingBuffer] = None,
-        ast_graph: Optional[CodebaseGraph] = None
+        ast_graph: Optional[CodebaseGraph] = None,
+        resource_peak_threshold_kb: float = 65536.0,
+        resource_delta_threshold_kb: float = 16384.0,
     ):
         self.wal_ring = wal_ring
         self.ast_graph = ast_graph or CodebaseGraph()
+        self.resource_peak_threshold_kb = float(resource_peak_threshold_kb)
+        self.resource_delta_threshold_kb = float(resource_delta_threshold_kb)
 
     def compile(
         self,
@@ -89,6 +93,7 @@ class CausalCrashCompiler:
         http_events: List[Dict[str, Any]] = []
         sql_events: List[Dict[str, Any]] = []
         subprocess_events: List[Dict[str, Any]] = []
+        resource_events: List[Dict[str, Any]] = []
         other_events: List[Dict[str, Any]] = []
 
         for e in recent_events:
@@ -99,12 +104,23 @@ class CausalCrashCompiler:
                 sql_events.append(e)
             elif etype in ("SUBPROCESS", "subprocess", "SUBPROCESS_START", "SUBPROCESS_EXIT"):
                 subprocess_events.append(e)
+            elif etype == "RESOURCE_PROFILE":
+                resource_events.append(e)
             elif etype != "EXCEPTION":
                 other_events.append(e)
 
         n_plus_one_findings = PerformanceDetector().detect_n_plus_one(
             [e for e in perf_events if _matches_crash_trace(e)] if crash_trace_id else perf_events
         )
+        if perf_events:
+            all_resources = [e for e in perf_events if e.get("event_type") == "RESOURCE_PROFILE"]
+            if all_resources:
+                trace_resources = (
+                    [e for e in all_resources if _matches_crash_trace(e)]
+                    if crash_trace_id
+                    else []
+                )
+                resource_events = trace_resources or all_resources
 
         # 3. Compute AST blast-radius
         blast_radius: Dict[str, Any] = {}
@@ -303,6 +319,9 @@ class CausalCrashCompiler:
                 )
             md.append("")
 
+        if resource_events:
+            md.extend(self._render_resource_footprint_section(resource_events))
+
         # Section 6: Suggested Fix Mandate
         md.append("## 6. Suggested Fix Mandate")
         md.append("1. Validate incoming state and preconditions before executing the culprit statement.")
@@ -335,4 +354,43 @@ class CausalCrashCompiler:
             md.append("*No events recorded in flight recorder.*")
         md.append("")
         return "\n".join(md)
+
+    def _render_resource_footprint_section(self, resource_events: List[Dict[str, Any]]) -> List[str]:
+        lines: List[str] = ["## Resource & Memory Footprint"]
+        lines.append("| Scope | Current (KiB) | Peak (KiB) | Delta (KiB) | Open FDs | Status |")
+        lines.append("|---|---|---|---|---|---|")
+        latest_allocations: List[Dict[str, Any]] = []
+        for idx, ev in enumerate(resource_events):
+            p = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+            label = str(p.get("label") or ev.get("source") or "run")
+            cur_kb = float(p.get("current_kb") or 0.0)
+            peak_kb = float(p.get("peak_kb") or 0.0)
+            delta_kb = float(p.get("delta_kb") or 0.0)
+            open_fds = p.get("open_fds")
+            fd_cell = str(open_fds) if open_fds is not None else "-"
+            exceeded = (
+                bool(p.get("threshold_exceeded"))
+                or peak_kb >= self.resource_peak_threshold_kb
+                or delta_kb >= self.resource_delta_threshold_kb
+            )
+            status_cell = "ALERT (threshold exceeded)" if exceeded else "ok"
+            lines.append(
+                f"| `{label}` | `{cur_kb:.2f}` | `{peak_kb:.2f}` | `{delta_kb:+.2f}` | `{fd_cell}` | `{status_cell}` |"
+            )
+            if idx == 0 and isinstance(p.get("top_allocations"), list):
+                latest_allocations = p["top_allocations"]
+
+        if latest_allocations:
+            lines.append("")
+            lines.append("### Top Memory Allocation Sites")
+            lines.append("| File | Line | Size (KiB) | Allocations |")
+            lines.append("|---|---|---|---|")
+            for site in latest_allocations[:5]:
+                fn = str(site.get("file", "<unknown>")).replace("|", "\\|")
+                ln = int(site.get("line", site.get("lineno", 0)) or 0)
+                sz = float(site.get("size_kb", 0.0) or 0.0)
+                cnt = int(site.get("count", 0) or 0)
+                lines.append(f"| `{fn}` | `{ln}` | `{sz:.2f}` | `{cnt}` |")
+        lines.append("")
+        return lines
 

@@ -142,6 +142,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     perf_parser.add_argument("--threshold", type=int, default=5, help="Minimum repeated fingerprint count for N+1 SQL alerts (default: 5)")
     perf_parser.add_argument("--json", action="store_true", help="Output structured JSON instead of markdown")
 
+    # Subcommand: heal-plan
+    heal_parser = subparsers.add_parser("heal-plan", help="Generate deterministic step-by-step autonomous repair plan from WAL telemetry")
+    heal_parser.add_argument("--db", default=".blackbox/wal.sqlite", help="Path to WAL database (default: .blackbox/wal.sqlite)")
+    heal_parser.add_argument("--baseline", default=".blackbox/wal.baseline.sqlite", help="Path to baseline WAL database (default: .blackbox/wal.baseline.sqlite)")
+    heal_parser.add_argument("--root", default=".", help="Project root directory (default: .)")
+    heal_parser.add_argument("--json", action="store_true", help="Output structured JSON instead of markdown")
+
     args = parser.parse_args(argv)
 
 
@@ -442,6 +449,20 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(json.dumps(report, indent=2, default=str))
         else:
             print(report["markdown_report"])
+        return 0
+
+    elif args.command == "heal-plan":
+        from .compiler.heal_planner import AutonomousHealPlanner
+        planner = AutonomousHealPlanner()
+        plan = planner.build_heal_plan(
+            wal_path=args.db,
+            baseline_path=args.baseline,
+            root_dir=args.root,
+        )
+        if args.json:
+            print(json.dumps(plan, indent=2, default=str))
+        else:
+            print(plan["markdown_plan"])
         return 0
 
     return 0
