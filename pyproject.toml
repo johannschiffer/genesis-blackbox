@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "genesis-blackbox"
-version = "0.2.0"
+version = "0.3.0"
 
 description = "Deterministic Runtime Flight Recorder & AST Blast-Radius Causal Crash Compiler for AI-Assisted Software Engineering"
 readme = "README.md"
@@ -24,7 +24,7 @@ classifiers = [
     "Topic :: Software Development :: Debuggers",
     "Topic :: Software Development :: Quality Assurance"
 ]
-dependencies = []
+dependencies = ["pytest>=7.0.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0.0", "pytest-asyncio>=0.20.0"]

@@ -395,7 +395,7 @@ class StateDiffer:
                     return f"SQL bind param shape mutation: {shape_diff}"
 
         # HTTP checks
-        if event_type in ("HTTP_REQ", "HTTP_CLIENT", "HTTP_RESP"):
+        if event_type in ("HTTP_REQ", "HTTP_CLIENT", "HTTP_RESP", "http_transaction"):
             b_path = b_payload.get("path", b_payload.get("url"))
             f_path = f_payload.get("path", f_payload.get("url"))
             if b_path != f_path:

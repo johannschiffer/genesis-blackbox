@@ -227,6 +227,11 @@ class WalRingBuffer:
         """Closes the underlying database connection."""
         with self._lock:
             if not self._closed:
+                try:
+                    with self._conn:
+                        self._prune_unlocked()
+                except sqlite3.Error:
+                    pass
                 self._conn.close()
                 self._closed = True
 

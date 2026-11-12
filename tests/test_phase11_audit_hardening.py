@@ -103,7 +103,10 @@ def test_wsgi_non_seekable_stream_preserved(tmp_path):
     ring.close()
 
 
-def test_threading_excepthook_and_singleton_wal_rebind(tmp_path):
+def test_threading_excepthook_and_singleton_wal_rebind(tmp_path, monkeypatch):
+    # Isolate threading.excepthook from pytest's threadexception plugin wrapper so the
+    # expected background-thread crash does not emit PytestUnhandledThreadExceptionWarning.
+    monkeypatch.setattr(threading, "excepthook", threading.__excepthook__)
     ring1 = WalRingBuffer(db_path=str(tmp_path / "r1.sqlite"))
     ring2 = WalRingBuffer(db_path=str(tmp_path / "r2.sqlite"))
     try:

@@ -219,7 +219,6 @@ class CrashReproducer:
 
         # Fetch preceding SQL, HTTP, and SUBPROCESS events
         recent_events = self.wal_ring.query_recent(limit=15)
-        sql_events = [e for e in recent_events if e.get("event_type") in ("SQL_QUERY", "sql_query")]
         sub_events = [e for e in recent_events if e.get("event_type") in ("SUBPROCESS", "subprocess")]
 
         # Filter local variables (remove dunders and private variables)
@@ -245,6 +244,8 @@ class CrashReproducer:
             "import os",
             "import sys",
             "import importlib.util",
+            "import inspect",
+            "import asyncio",
             "from unittest.mock import patch, MagicMock",
             "import pytest",
             "",
@@ -275,6 +276,26 @@ class CrashReproducer:
             '    return func',
             "",
             "",
+            "def _invoke(func, kwargs):",
+            '    \"\"\"Calls func binding captured locals by name; awaits coroutines.\"\"\"',
+            "    try:",
+            "        sig = inspect.signature(func)",
+            "    except (TypeError, ValueError):",
+            "        sig = None",
+            "    if sig is not None:",
+            "        params = sig.parameters",
+            "        if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):",
+            "            call_kwargs = dict(kwargs)",
+            "        else:",
+            "            call_kwargs = {k: v for k, v in kwargs.items() if k in params}",
+            "        result = func(**call_kwargs)",
+            "    else:",
+            "        result = func(*list(kwargs.values()))",
+            "    if inspect.isawaitable(result):",
+            "        result = asyncio.run(result)",
+            "    return result",
+            "",
+            "",
             "def test_reproduce_and_verify_fix():",
             '    """',
             f'    Reproduces crash scenario: {safe_doc_type}: {safe_doc_msg}.',
@@ -301,25 +322,17 @@ class CrashReproducer:
                 "    # Subprocess interactions detected in execution timeline",
                 "    with patch('subprocess.run') as mock_sub_run:",
                 "        mock_sub_run.return_value = MagicMock(returncode=0, stdout='ok', stderr='')",
-                "        try:",
-                "            result = target_func(**reconstructed_args)",
-                "        except TypeError:",
-                "            # If function expects positional args, invoke with values",
-                "            result = target_func(*list(reconstructed_args.values()))",
+                "        result = _invoke(target_func, reconstructed_args)",
             ])
         else:
             lines.extend([
-                "    try:",
-                "        result = target_func(**reconstructed_args)",
-                "    except TypeError:",
-                "        # If function expects positional args, invoke with values",
-                "        result = target_func(*list(reconstructed_args.values()))",
+                "    result = _invoke(target_func, reconstructed_args)",
             ])
 
         lines.extend([
             "",
             "    # Verification: Function completed cleanly without the recorded exception",
-            "    assert result is not None or result is None  # Ensures function returned successfully",
+            "    del result  # Reaching this line means no exception was raised",
             "",
             "",
             'if __name__ == "__main__":',
