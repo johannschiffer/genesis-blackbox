@@ -93,6 +93,7 @@ class CausalCrashCompiler:
         http_events: List[Dict[str, Any]] = []
         sql_events: List[Dict[str, Any]] = []
         subprocess_events: List[Dict[str, Any]] = []
+        mcp_events: List[Dict[str, Any]] = []
         resource_events: List[Dict[str, Any]] = []
         other_events: List[Dict[str, Any]] = []
 
@@ -104,6 +105,8 @@ class CausalCrashCompiler:
                 sql_events.append(e)
             elif etype in ("SUBPROCESS", "subprocess", "SUBPROCESS_START", "SUBPROCESS_EXIT"):
                 subprocess_events.append(e)
+            elif etype == "MCP_TOOL":
+                mcp_events.append(e)
             elif etype == "RESOURCE_PROFILE":
                 resource_events.append(e)
             elif etype != "EXCEPTION":
@@ -259,6 +262,22 @@ class CausalCrashCompiler:
                 md.append(f"| `{cmd}` | `{args_val}` | `{retcode}` | {lat} | `{status}` | {stderr_val} |")
             md.append("")
 
+        if mcp_events:
+            md.append("### Recent MCP Tool Invocations")
+            md.append("| Tool | Source | Status | Latency | Error / Details |")
+            md.append("|---|---|---|---|---|")
+            for m in reversed(mcp_events[:8]):
+                p = m.get("payload") if isinstance(m.get("payload"), dict) else {}
+                tool_name = p.get("tool", "-")
+                src = m.get("source", "-")
+                status = m.get("status", "ok")
+                lat = f"{m.get('duration_ms', 0):.2f}ms" if m.get("duration_ms") is not None else "-"
+                detail = str(p.get("error") or p.get("session_id") or "-").replace("\n", " ")
+                if len(detail) > 50:
+                    detail = detail[:47] + "..."
+                md.append(f"| `{tool_name}` | `{src}` | `{status}` | {lat} | `{detail}` |")
+            md.append("")
+
         if recent_events:
             md.append("### Chronological Event Stream")
             md.append("| Seq | Event Type | Source | Status | Payload |")
@@ -337,9 +356,31 @@ class CausalCrashCompiler:
         if self.wal_ring:
             recent_events = self.wal_ring.query_recent(limit=recent_events_count)
 
+        operational_types = ("SQL_QUERY", "SQL_EXEC", "HTTP_CLIENT", "HTTP_REQ", "SUBPROCESS", "MCP_TOOL")
+        error_events = [
+            e for e in recent_events
+            if e.get("status") == "error" and e.get("event_type") in operational_types
+        ]
+
         md = []
-        md.append("# BLACKBOX EXECUTION TIMELINE (NO CRASH RECORDED)")
-        md.append(f"**Total Recent Events:** {len(recent_events)}")
+        if error_events:
+            latest_err = error_events[0]
+            err_payload = latest_err.get("payload") if isinstance(latest_err.get("payload"), dict) else {}
+            err_summary = (
+                err_payload.get("error")
+                or err_payload.get("query")
+                or err_payload.get("command")
+                or str(latest_err.get("payload", ""))
+            )
+            md.append("# ⚠️ BLACKBOX OPERATIONAL INCIDENT CAPSULE")
+            md.append(f"**Operational Failure:** `{latest_err.get('event_type')}` from `{latest_err.get('source')}`")
+            if err_payload.get("tool"):
+                md.append(f"**Failing Tool:** `{err_payload.get('tool')}`")
+            md.append(f"**Error Detail:** `{err_summary}`")
+            md.append(f"**Total Recent Events:** {len(recent_events)} ({len(error_events)} error event(s))")
+        else:
+            md.append("# BLACKBOX EXECUTION TIMELINE (NO CRASH RECORDED)")
+            md.append(f"**Total Recent Events:** {len(recent_events)}")
         md.append("")
         if recent_events:
             md.append("| ID | Event Type | Source | Status | Duration | Summary |")

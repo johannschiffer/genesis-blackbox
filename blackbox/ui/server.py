@@ -471,6 +471,7 @@ EMBEDDED_HTML = """<!DOCTYPE html>
       if (upper.startsWith('HTTP')) return 'tag-http';
       if (upper.startsWith('SQL')) return 'tag-sql';
       if (upper === 'EXCEPTION' || upper.includes('CRASH') || upper.includes('ERROR')) return 'tag-exc';
+      if (upper === 'MCP_TOOL' || upper === 'SUBPROCESS') return 'tag-sys';
       return 'tag-sys';
     }
 
@@ -884,6 +885,7 @@ class BlackboxUIRequestHandler(BaseHTTPRequestHandler):
 
         resp_data = {
             "has_crash": has_crash,
+            "has_operational_incident": "BLACKBOX OPERATIONAL INCIDENT CAPSULE" in autopsy_text,
             "autopsy_markdown": autopsy_text,
             **exc_info
         }

@@ -372,6 +372,29 @@ class BlackboxMCPServer:
                     baseline_db_path=args.get("baseline_db_path", ".blackbox/wal.baseline.sqlite"),
                     root_dir=args.get("root_dir", ".")
                 )
+            },
+            "diagnose_mcp_ecosystem": {
+                "name": "diagnose_mcp_ecosystem",
+                "description": "Aggregates per-server invocation counts, latency, security blocks, and operational errors across all Genesis MCP servers connected to WAL.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "db_path": {
+                            "type": "string",
+                            "description": "Path to WAL SQLite database (default: .blackbox/wal.sqlite)",
+                            "default": ".blackbox/wal.sqlite"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum recent WAL events to analyze (default: 500)",
+                            "default": 500
+                        }
+                    }
+                },
+                "handler": lambda args: self.diagnose_mcp_ecosystem(
+                    db_path=args.get("db_path", self.default_db_path),
+                    limit=int(args.get("limit", 500))
+                )
             }
         }
         self.tools["blackbox_get_crash_autopsy"] = self.tools["get_crash_autopsy"]
@@ -388,6 +411,7 @@ class BlackboxMCPServer:
         self.tools["blackbox_get_full_incident_context"] = self.tools["get_full_incident_context"]
         self.tools["blackbox_diagnose_performance_and_flakiness"] = self.tools["diagnose_performance_and_flakiness"]
         self.tools["blackbox_get_autonomous_heal_plan"] = self.tools["get_autonomous_heal_plan"]
+        self.tools["blackbox_diagnose_mcp_ecosystem"] = self.tools["diagnose_mcp_ecosystem"]
 
     def generate_reproduction_test(self, db_path: str = ".blackbox/wal.sqlite") -> str:
         """Synthesizes and returns standalone Python reproduction test script from WAL database."""
@@ -533,6 +557,7 @@ class BlackboxMCPServer:
             "performance_and_flakiness": performance_and_flakiness,
             "egress_stubs": egress_stubs,
             "resource_profile": resource_profile,
+            "mcp_ecosystem": self.diagnose_mcp_ecosystem(db_path=db_path),
         }
 
     def diagnose_performance_and_flakiness(
@@ -564,6 +589,15 @@ class BlackboxMCPServer:
             baseline_path=baseline_db_path,
             root_dir=root_dir,
         )
+
+    def diagnose_mcp_ecosystem(
+        self,
+        db_path: str = ".blackbox/wal.sqlite",
+        limit: int = 500,
+    ) -> Dict[str, Any]:
+        """Aggregates operational metrics and error telemetry across connected Genesis MCP servers."""
+        from .stack import GenesisStackManager
+        return GenesisStackManager().diagnose_ecosystem(db_path=db_path, limit=limit)
 
     def get_crash_autopsy(self, db_path: str = ".blackbox/wal.sqlite") -> str:
         """Compiles and returns .blackbox.md autopsy markdown from WAL database."""
@@ -656,7 +690,8 @@ class BlackboxMCPServer:
                 "inspect_crash_bundle",
                 "get_full_incident_context",
                 "diagnose_performance_and_flakiness",
-                "get_autonomous_heal_plan"
+                "get_autonomous_heal_plan",
+                "diagnose_mcp_ecosystem"
             ]
 
             tool_list = [

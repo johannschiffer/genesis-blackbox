@@ -27,7 +27,8 @@ When coding agents (Claude Code, Cursor, Windsurf, Antigravity) encounter runtim
 10. **Surgical Watch Mode (`watcher.py`):** Zero-dependency `os.stat` source watcher (`blackbox watch`) that selects and runs only AST-impacted tests on edits, rotating baselines on pass and compiling crash artifacts on failure.
 11. **Async TraceContext, N+1 SQL & Flake Analyzer (`context.py`, `perf_detector.py`, `flake_analyzer.py`):** `contextvars`-isolated async request tracing across `asyncio.gather`, N+1 SQL fingerprint clustering (`## Performance & N+1 Query Diagnostics` in `.blackbox.md`), baseline latency regression detection, and non-determinism/flakiness classification (`blackbox diagnose-perf`).
 12. **Offline Egress Mocker, Resource Profiler & Autonomous Heal Planner (`egress_mocker.py`, `resource_profiler.py`, `heal_planner.py`):** Sanitized `urllib.request.urlopen` egress capture with `unittest.mock` offline stub injection into `CrashReproducer`, stdlib `tracemalloc` + `gc` + `/proc/self/fd` memory profiling (`## Resource & Memory Footprint` in `.blackbox.md`), and deterministic 4-step repair planning (`blackbox heal-plan`).
-13. **Native MCP Server & Live SSE Web Inspector (`mcp_server.py`, `ui/`):** Stdio MCP server (`blackbox-mcp`) exposing 14 diagnostic tools (including `get_full_incident_context`, `diagnose_performance_and_flakiness`, and `get_autonomous_heal_plan`) alongside a localhost timeline viewer with live Server-Sent Events (SSE) streaming (`GET /api/live`).
+13. **Unified MCP Stack Provisioner & Operational Incident Compiler (`stack.py`, `autopsy.py`):** Non-destructive client stack config provisioning (`blackbox init-stack`) linking `blackbox-mcp` and the 6 Genesis MCP servers (`v2.1.0`) to one WAL, cross-server telemetry diagnostics (`diagnose_mcp_ecosystem`), `MCP_TOOL` timeline rendering, and `# ⚠️ BLACKBOX OPERATIONAL INCIDENT CAPSULE` generation for non-exception tool errors.
+14. **Native MCP Server & Live SSE Web Inspector (`mcp_server.py`, `ui/`):** Stdio MCP server (`blackbox-mcp`) exposing 15 diagnostic tools (including `get_full_incident_context`, `diagnose_performance_and_flakiness`, `get_autonomous_heal_plan`, and `diagnose_mcp_ecosystem`) alongside a localhost timeline viewer with live Server-Sent Events (SSE) streaming (`GET /api/live`).
 
 ---
 
@@ -146,6 +147,9 @@ blackbox ci-summary --autopsy .blackbox.md
 # Initialize agent workflow rules (.cursorrules, CLAUDE.md, or .windsurfrules)
 blackbox init-rules --type claude
 
+# Provision unified MCP stack config sharing one WAL database across all 7 Genesis servers
+blackbox init-stack --client cursor [--output .cursor/mcp.json] [--db .blackbox/wal.sqlite]
+
 # Launch the localhost timeline and autopsy web inspector with live SSE streaming
 blackbox ui --port 8765 --no-browser
 ```
@@ -178,9 +182,10 @@ python examples/03_autonomous_patch_loop/run_demo.py
 
 ## MCP Server Configuration
 
-`genesis-blackbox` ships the `blackbox-mcp` stdio server exposing 14 diagnostic and repair tools:
+`genesis-blackbox` ships the `blackbox-mcp` stdio server exposing 15 diagnostic and repair tools:
 
-- `get_full_incident_context`: 1-call unified payload returning `autopsy_markdown`, `baseline_diff`, `reproduction_test`, `impacted_tests`, `performance_and_flakiness`, `egress_stubs`, and `resource_profile`.
+- `get_full_incident_context`: 1-call unified payload returning `autopsy_markdown`, `baseline_diff`, `reproduction_test`, `impacted_tests`, `performance_and_flakiness`, `egress_stubs`, `resource_profile`, and `mcp_ecosystem`.
+- `diagnose_mcp_ecosystem`: Aggregates per-server invocation counts, latency, security guard blocks, and operational errors across all connected Genesis MCP servers.
 - `get_autonomous_heal_plan`: Synthesizes a deterministic 4-step remediation plan combining root cause, offline HTTP egress stubs, performance/memory alerts, baseline divergence, and impacted regression tests.
 - `diagnose_performance_and_flakiness`: Detects N+1 SQL query loops, baseline latency regressions, and test flakiness causes.
 - `get_crash_autopsy`: Compiles `.blackbox.md` from recorded WAL events.

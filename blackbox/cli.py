@@ -149,6 +149,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     heal_parser.add_argument("--root", default=".", help="Project root directory (default: .)")
     heal_parser.add_argument("--json", action="store_true", help="Output structured JSON instead of markdown")
 
+    # Subcommand: init-stack
+    stack_parser = subparsers.add_parser("init-stack", help="Provision unified MCP configuration for Genesis Blackbox and the 6 Genesis MCP servers")
+    stack_parser.add_argument("--client", choices=["cursor", "claude", "windsurf"], default="cursor", help="Target MCP client (default: cursor)")
+    stack_parser.add_argument("--output", default=None, help="Custom output file path for MCP JSON configuration")
+    stack_parser.add_argument("--db", default=".blackbox/wal.sqlite", help="Shared SQLite WAL database path (default: .blackbox/wal.sqlite)")
+
     args = parser.parse_args(argv)
 
 
@@ -463,6 +469,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(json.dumps(plan, indent=2, default=str))
         else:
             print(plan["markdown_plan"])
+        return 0
+
+    elif args.command == "init-stack":
+        from .stack import GenesisStackManager
+        res = GenesisStackManager().init_stack_config(
+            client=args.client,
+            output_path=args.output,
+            db_path=args.db,
+        )
+        print(f"[Genesis-Blackbox] Unified Genesis MCP stack ({res['client']}) written to {res['config_path']}")
         return 0
 
     return 0

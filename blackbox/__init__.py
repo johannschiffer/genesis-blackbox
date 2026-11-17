@@ -2,7 +2,7 @@
 Genesis Blackbox: Flight Recorder & AST Blast-Radius Causal Crash Compiler.
 """
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 __author__ = "Johann Schiffer / Project Genesis"
 __license__ = "MIT"
 
@@ -33,6 +33,7 @@ from .compiler.heal_planner import AutonomousHealPlanner
 from .recorder.bundle import CrashBundler
 from .ci.github_summary import export_github_step_summary
 from .mcp_server import BlackboxMCPServer
+from .stack import GenesisStackManager
 
 __all__ = [
     "WalRingBuffer",
@@ -74,7 +75,8 @@ __all__ = [
     "AutonomousHealPlanner",
     "CrashBundler",
     "export_github_step_summary",
-    "BlackboxMCPServer"
+    "BlackboxMCPServer",
+    "GenesisStackManager"
 ]
 
 

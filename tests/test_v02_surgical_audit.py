@@ -526,6 +526,7 @@ def test_mcp_tools_list_exposes_all_tools(tmp_path: Path):
             "get_full_incident_context",
             "diagnose_performance_and_flakiness",
             "get_autonomous_heal_plan",
+            "diagnose_mcp_ecosystem",
         }
     finally:
         server.close()

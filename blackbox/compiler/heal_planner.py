@@ -31,6 +31,8 @@ class AutonomousHealPlanner:
         graph = CodebaseGraph()
 
         has_crash = False
+        has_operational_incident = False
+        operational_incidents: List[Dict[str, Any]] = []
         root_cause_info: Dict[str, Any] = {}
         egress_stubs: List[Dict[str, Any]] = []
         resource_profile: Optional[Dict[str, Any]] = None
@@ -84,6 +86,39 @@ class AutonomousHealPlanner:
                 recent_events,
                 trace_id=crash_trace_id,
             )
+
+            for ev in recent_events:
+                if ev.get("status") == "error" and ev.get("event_type") != "EXCEPTION":
+                    ev_payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+                    err_summary = (
+                        ev_payload.get("error")
+                        or ev_payload.get("query")
+                        or ev_payload.get("command")
+                        or str(ev.get("payload", ""))
+                    )
+                    operational_incidents.append(
+                        {
+                            "id": ev.get("id"),
+                            "timestamp": ev.get("timestamp"),
+                            "source": ev.get("source"),
+                            "event_type": ev.get("event_type"),
+                            "tool": ev_payload.get("tool"),
+                            "error": str(err_summary),
+                            "trace_id": ev.get("trace_id") or ev_payload.get("trace_id"),
+                        }
+                    )
+
+            has_operational_incident = len(operational_incidents) > 0
+            if not has_crash and has_operational_incident:
+                inc = operational_incidents[0]
+                root_cause_info = {
+                    "exception_type": f"OperationalError[{inc['event_type']}]",
+                    "exception_message": str(inc.get("error") or "Operational error"),
+                    "filename": inc.get("source") or "",
+                    "function": inc.get("tool") or "",
+                    "lineno": None,
+                    "trace_id": inc.get("trace_id"),
+                }
 
             for ev in recent_events:
                 if ev.get("event_type") != "RESOURCE_PROFILE":
@@ -164,6 +199,8 @@ class AutonomousHealPlanner:
 
         plan: Dict[str, Any] = {
             "has_crash": has_crash,
+            "has_operational_incident": has_operational_incident,
+            "operational_incidents": operational_incidents[:10],
             "root_cause": root_cause_info,
             "egress_stubs": egress_stubs,
             "resource_profile": resource_profile,
@@ -274,6 +311,11 @@ class AutonomousHealPlanner:
             )
             if rc.get("trace_id"):
                 lines.append(f"- **Trace ID:** `{rc.get('trace_id')}`")
+        elif plan.get("has_operational_incident"):
+            lines.append(
+                f"- **Operational Incident:** `{rc.get('exception_type')}`: {rc.get('exception_message')} "
+                f"(source: `{rc.get('filename')}`)"
+            )
 
         lines.extend([
             f"- **Offline HTTP Egress Stubs:** `{len(plan.get('egress_stubs', []))}`",
