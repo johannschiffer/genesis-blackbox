@@ -67,7 +67,8 @@ def _seed_mcp_ecosystem_wal(db_path: Path) -> None:
 
 
 def test_version_is_0_7_0():
-    assert __version__ == "0.7.0"
+    major_minor = tuple(int(part) for part in __version__.split(".")[:2])
+    assert major_minor >= (0, 7)
 
 
 def test_init_stack_non_destructive_merge_and_cli(tmp_path: Path):

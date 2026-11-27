@@ -9,11 +9,15 @@ import runpy
 import shutil
 import tempfile
 import subprocess
+from contextlib import ExitStack
 from typing import Optional
 from .wal_ring import WalRingBuffer
 from .exception_hook import ExceptionHook
 from .process_hook import SubprocessInterceptor
 from .baseline import BaselineManager
+from .egress_mocker import EgressMocker
+from .resource_profiler import ResourceProfiler
+from .sql_interceptor import SqlInterceptor
 
 
 _BOOTSTRAP_SITECUSTOMIZE = """import atexit
@@ -30,13 +34,36 @@ if _db_path and not os.environ.get("_BLACKBOX_CHILD_ATTACHED"):
         from blackbox.recorder.wal_ring import WalRingBuffer
         from blackbox.recorder.exception_hook import install_exception_hook, uninstall_exception_hook
         from blackbox.recorder.process_hook import SubprocessInterceptor
+        from blackbox.recorder.egress_mocker import EgressMocker
+        from blackbox.recorder.sql_interceptor import SqlInterceptor
+        from blackbox.recorder.resource_profiler import ResourceProfiler
 
         _ring = WalRingBuffer(db_path=_db_path)
         install_exception_hook(wal_ring=_ring)
         SubprocessInterceptor.install_global(wal_ring=_ring)
 
+        _egress = None
+        if os.environ.get("BLACKBOX_EGRESS", "1") != "0":
+            _egress = EgressMocker(wal_ring=_ring).install()
+
+        _sql_hooked = False
+        if os.environ.get("BLACKBOX_SQL", "0") == "1":
+            SqlInterceptor.install_sqlite3_global(_ring)
+            _sql_hooked = True
+
+        _prof_ctx = None
+        if os.environ.get("BLACKBOX_PROFILE", "0") == "1":
+            _prof_ctx = ResourceProfiler().profile_scope(wal_ring=_ring, label="subprocess")
+            _prof_ctx.__enter__()
+
         def _cleanup():
             try:
+                if _prof_ctx is not None:
+                    _prof_ctx.__exit__(None, None, None)
+                if _sql_hooked:
+                    SqlInterceptor.uninstall_sqlite3_global()
+                if _egress is not None:
+                    _egress.uninstall()
                 uninstall_exception_hook()
                 SubprocessInterceptor.uninstall()
                 _ring.close()
@@ -103,6 +130,9 @@ def run_target(
     auto_baseline: bool = True,
     baseline_path: Optional[str] = None,
     autopsy_path: Optional[str] = None,
+    capture_egress: bool = True,
+    profile_resources: bool = False,
+    capture_sql: bool = False,
 ) -> int:
     """Executes target script or command with automatic Blackbox flight recorder attached."""
     if not cmd_args:
@@ -118,12 +148,20 @@ def run_target(
         hook = ExceptionHook(wal_ring=ring)
         hook.install()
         SubprocessInterceptor.install_global(wal_ring=ring)
+        egress_mocker = EgressMocker(wal_ring=ring).install() if capture_egress else None
+        if capture_sql:
+            SqlInterceptor.install_sqlite3_global(ring)
         orig_argv = sys.argv[:]
         sys.argv = list(cmd_args)
         ring.record(event_type="PROCESS_START", payload={"script": target, "argv": cmd_args}, source="blackbox_runner")
         exit_code = 1
         try:
-            runpy.run_path(target, run_name="__main__")
+            with ExitStack() as stack:
+                if profile_resources:
+                    stack.enter_context(
+                        ResourceProfiler().profile_scope(wal_ring=ring, label=os.path.basename(target))
+                    )
+                runpy.run_path(target, run_name="__main__")
             ring.record(event_type="PROCESS_EXIT", payload={"script": target, "exit_code": 0}, source="blackbox_runner")
             exit_code = 0
             return 0
@@ -139,6 +177,10 @@ def run_target(
             raise
         finally:
             sys.argv = orig_argv
+            if capture_sql:
+                SqlInterceptor.uninstall_sqlite3_global()
+            if egress_mocker is not None:
+                egress_mocker.uninstall()
             hook.uninstall()
             SubprocessInterceptor.uninstall()
             ring.close()
@@ -162,6 +204,9 @@ def run_target(
         env = os.environ.copy()
         env.pop("_BLACKBOX_CHILD_ATTACHED", None)
         env["BLACKBOX_DB_PATH"] = os.path.abspath(db_path)
+        env["BLACKBOX_EGRESS"] = "1" if capture_egress else "0"
+        env["BLACKBOX_PROFILE"] = "1" if profile_resources else "0"
+        env["BLACKBOX_SQL"] = "1" if capture_sql else "0"
         pkg_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         existing_pp = env.get("PYTHONPATH", "")
         path_parts = [bootstrap_dir, pkg_dir] + ([existing_pp] if existing_pp else [])

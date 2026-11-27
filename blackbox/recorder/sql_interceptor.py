@@ -5,9 +5,19 @@ execution timings, affected rowcounts, and exact database exceptions.
 Compatible with standard DB-API (sqlite3, psycopg2), asyncpg, and SQLAlchemy.
 """
 
+import os
+import sqlite3
+import threading
+import os
+import sqlite3
+import threading
 import time
 from typing import Any, Dict, List, Optional, Sequence, Union
 from .wal_ring import WalRingBuffer
+
+_SQL_HOOK_STATE = threading.local()
+
+_sql_hook_state = threading.local()
 
 SENSITIVE_SQL_KEYS = {
     "password", "passwd", "secret", "token", "auth", "key",
@@ -103,13 +113,18 @@ class SqlTraceContext:
             payload["error"] = self.error
             payload["error_type"] = self.error_type
 
-        self.wal_ring.record(
-            event_type="sql_query",
-            source=self.database,
-            duration_ms=round(duration_ms, 3),
-            status=self.status,
-            payload=payload
-        )
+        prev_guard = getattr(_sql_hook_state, "in_record", False)
+        _sql_hook_state.in_record = True
+        try:
+            self.wal_ring.record(
+                event_type="sql_query",
+                source=self.database,
+                duration_ms=round(duration_ms, 3),
+                status=self.status,
+                payload=payload
+            )
+        finally:
+            _sql_hook_state.in_record = prev_guard
 
 
 class TracedCursor:
@@ -171,6 +186,18 @@ class TracedConnection:
         c = self.cursor()
         return c.executemany(query, seq_of_params)
 
+    def executescript(self, sql_script: str) -> Any:
+        with SqlTraceContext(self._wal_ring, sql_script, None, database=self._database) as tracer:
+            result = self._conn.executescript(sql_script)
+            tracer.set_rows_affected(0)
+            return result
+
+    def executescript(self, sql_script: str) -> Any:
+        with SqlTraceContext(self._wal_ring, sql_script, None, database=self._database) as tracer:
+            result = self._conn.executescript(sql_script)
+            tracer.set_rows_affected(getattr(result, "rowcount", 0) if result is not None else 0)
+            return result
+
     def commit(self) -> None:
         return self._conn.commit()
 
@@ -196,8 +223,65 @@ class TracedConnection:
 class SqlInterceptor:
     """Manager for hooking databases and logging SQL queries into WalRingBuffer."""
 
+    _orig_sqlite_connect = None
+    _global_wal_ring: Optional[WalRingBuffer] = None
+
     def __init__(self, wal_ring: WalRingBuffer):
         self.wal_ring = wal_ring
+
+    @classmethod
+    def install_sqlite3_global(cls, wal_ring: WalRingBuffer) -> None:
+        """Globally wraps `sqlite3.connect` to trace app SQL while skipping Blackbox WAL DBs."""
+        if cls._orig_sqlite_connect is None:
+            cls._orig_sqlite_connect = sqlite3.connect
+        cls._global_wal_ring = wal_ring
+        orig_connect = cls._orig_sqlite_connect
+
+        wal_db_path = getattr(wal_ring, "db_path", ":memory:")
+        wal_abs = os.path.abspath(wal_db_path) if wal_db_path and wal_db_path != ":memory:" else ":memory:"
+
+        def _traced_sqlite_connect(database, *args, **kwargs):
+            conn = orig_connect(database, *args, **kwargs)
+            active_ring = cls._global_wal_ring
+            if active_ring is None or getattr(active_ring, "_closed", False):
+                return conn
+            if getattr(_sql_hook_state, "in_record", False):
+                return conn
+            if kwargs.get("factory") is not None:
+                return conn
+
+            try:
+                db_raw = os.fspath(database)
+                if isinstance(db_raw, bytes):
+                    db_str = db_raw.decode("utf-8", errors="replace")
+                else:
+                    db_str = str(db_raw)
+            except TypeError:
+                db_str = str(database)
+
+            if db_str != ":memory:":
+                norm_db = os.path.abspath(db_str)
+                if norm_db == wal_abs or norm_db.endswith((
+                    os.path.join(".blackbox", "wal.sqlite"),
+                    "wal.sqlite",
+                    "wal.baseline.sqlite",
+                    ".baseline.sqlite",
+                )):
+                    return conn
+            elif wal_abs == ":memory:":
+                return conn
+
+            return TracedConnection(conn, active_ring, database="sqlite3")
+
+        sqlite3.connect = _traced_sqlite_connect
+
+    @classmethod
+    def uninstall_sqlite3_global(cls) -> None:
+        """Restores the original `sqlite3.connect` function."""
+        if cls._orig_sqlite_connect is not None:
+            sqlite3.connect = cls._orig_sqlite_connect
+            cls._orig_sqlite_connect = None
+        cls._global_wal_ring = None
 
     def trace(self, query: str, params: Any = None, database: str = "sqlite") -> SqlTraceContext:
         """Returns a context manager for manual SQL query tracing."""

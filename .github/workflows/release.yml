@@ -45,3 +45,9 @@ jobs:
         with:
           name: release-dist-${{ github.ref_name }}
           path: dist/
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

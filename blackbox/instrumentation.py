@@ -4,8 +4,10 @@ Provides one-call runtime instrumentation for Python web frameworks (FastAPI, St
 SQL databases (SQLAlchemy, sqlite3, DB-API), subprocess execution, and unhandled exception capture.
 """
 
+import atexit
 import sys
 import inspect
+import tracemalloc
 from typing import Any, Optional, Tuple, Union
 
 from .recorder.wal_ring import WalRingBuffer
@@ -13,12 +15,17 @@ from .recorder.exception_hook import ExceptionHook, install_exception_hook
 from .recorder.http_interceptor import BlackboxASGIMiddleware, BlackboxWSGIMiddleware
 from .recorder.sql_interceptor import SqlInterceptor, TracedConnection
 from .recorder.process_hook import SubprocessInterceptor
+from .recorder.egress_mocker import EgressMocker
+from .recorder.resource_profiler import ResourceProfiler
 
 
 def auto_instrument(
     app: Any = None,
     engine: Any = None,
-    wal_path: Union[str, WalRingBuffer] = ".blackbox/wal.sqlite"
+    wal_path: Union[str, WalRingBuffer] = ".blackbox/wal.sqlite",
+    capture_egress: bool = True,
+    profile_resources: bool = False,
+    capture_sql: bool = False,
 ) -> Any:
     """
     Unified 1-line auto-instrumentor for any Python application or microservice.
@@ -27,6 +34,9 @@ def auto_instrument(
         app: Web application instance (FastAPI, Starlette, Flask, Django, or raw ASGI/WSGI callable).
         engine: Database connection or SQLAlchemy engine instance.
         wal_path: Filepath for the circular SQLite WAL ring-buffer or an existing WalRingBuffer instance.
+        capture_egress: Automatically hook outbound HTTP calls (`urllib`, `requests`, `httpx`).
+        profile_resources: Capture memory/FD baseline and exit snapshots via `ResourceProfiler`.
+        capture_sql: Globally hook `sqlite3.connect` calls when True.
 
     Returns:
         The instrumented app, connection, or a tuple (app, engine) depending on inputs provided.
@@ -42,6 +52,40 @@ def auto_instrument(
 
     # 3. Automatically install subprocess interceptor
     SubprocessInterceptor.install_global(wal_ring=wal_ring)
+
+    # 3b. Automatically install outbound HTTP egress mocker
+    if capture_egress:
+        EgressMocker(wal_ring=wal_ring).install()
+
+    # 3c. Optional global sqlite3 interceptor
+    if capture_sql:
+        SqlInterceptor.install_sqlite3_global(wal_ring)
+
+    # 3d. Optional stdlib memory & FD profiling
+    if profile_resources:
+        if not tracemalloc.is_tracing():
+            tracemalloc.start(10)
+        profiler = ResourceProfiler()
+        snap = profiler.snapshot()
+        snap["label"] = "auto_instrument_start"
+        wal_ring.record(event_type="RESOURCE_PROFILE", payload=snap, source="resource_profiler", status="ok")
+
+        def _flush_final_profile() -> None:
+            try:
+                end_snap = profiler.snapshot()
+                end_snap["label"] = "auto_instrument_exit"
+                threshold_exceeded = end_snap.get("peak_kb", 0.0) >= profiler.peak_threshold_kb
+                end_snap["threshold_exceeded"] = threshold_exceeded
+                wal_ring.record(
+                    event_type="RESOURCE_PROFILE",
+                    payload=end_snap,
+                    source="resource_profiler",
+                    status="warning" if threshold_exceeded else "ok",
+                )
+            except Exception:
+                pass
+
+        atexit.register(_flush_final_profile)
 
     # 4. Instrument database connection or SQLAlchemy engine
     instrumented_engine = None

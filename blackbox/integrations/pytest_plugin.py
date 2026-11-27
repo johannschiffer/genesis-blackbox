@@ -13,15 +13,27 @@ import time
 import traceback
 from typing import Any, Dict, List, Optional
 
-import pytest
+try:
+    import pytest  # type: ignore
+except ImportError:
+    class _PytestFallback:
+        @staticmethod
+        def hookimpl(*args, **kwargs):
+            def _decorator(fn):
+                return fn
+            return _decorator
+
+    pytest = _PytestFallback()  # type: ignore
 
 from ..ast_engine.graph import CodebaseGraph
 from ..ci.github_summary import export_github_step_summary
 from ..compiler.autopsy import CausalCrashCompiler
 from ..compiler.reproducer import CrashReproducer
 from ..recorder.baseline import BaselineManager
+from ..recorder.egress_mocker import EgressMocker
 from ..recorder.exception_hook import ExceptionHook, install_exception_hook, uninstall_exception_hook
 from ..recorder.process_hook import SubprocessInterceptor
+from ..recorder.resource_profiler import ResourceProfiler
 from ..recorder.wal_ring import WalRingBuffer
 
 # Aliases for explicit architectural mapping
@@ -74,6 +86,20 @@ def pytest_addoption(parser, pluginmanager=None):
         dest="blackbox_no_auto_baseline",
         help="Disable automatic baseline WAL promotion when the pytest session passes cleanly."
     )
+    group.addoption(
+        "--no-egress-mock",
+        action="store_true",
+        default=False,
+        dest="blackbox_no_egress_mock",
+        help="Disable automatic outbound HTTP egress recording during --blackbox sessions."
+    )
+    group.addoption(
+        "--blackbox-profile",
+        action="store_true",
+        default=False,
+        dest="blackbox_profile",
+        help="Capture per-test tracemalloc memory and open FD profiles into WAL during --blackbox sessions."
+    )
 
 
 def pytest_configure(config):
@@ -102,6 +128,10 @@ def pytest_configure(config):
     # Install exception hook
     install_exception_hook(wal_ring=wal_ring)
 
+    # Install outbound HTTP egress recorder unless opted out
+    if not config.getoption("blackbox_no_egress_mock", False):
+        config._blackbox_egress = EgressMocker(wal_ring=wal_ring).install()
+
 
 def pytest_sessionfinish(session, exitstatus):
     """Captures the pytest session exitstatus for automatic baseline promotion."""
@@ -111,6 +141,13 @@ def pytest_sessionfinish(session, exitstatus):
 
 def pytest_unconfigure(config):
     """Restores global runtime hooks, closes WAL, and promotes clean baseline if applicable."""
+    if hasattr(config, "_blackbox_egress"):
+        try:
+            config._blackbox_egress.uninstall()
+        except Exception:
+            pass
+        delattr(config, "_blackbox_egress")
+
     if hasattr(config, "_blackbox_wal"):
         uninstall_exception_hook()
         SubprocessInterceptor.uninstall()
@@ -161,7 +198,11 @@ def pytest_runtest_protocol(item, nextitem):
     )
 
     t0 = time.time()
-    outcome = yield
+    if config.getoption("blackbox_profile", False):
+        with ResourceProfiler().profile_scope(wal_ring=wal_ring, label=item.nodeid):
+            outcome = yield
+    else:
+        outcome = yield
     duration_ms = (time.time() - t0) * 1000.0
 
     wal_ring.record(

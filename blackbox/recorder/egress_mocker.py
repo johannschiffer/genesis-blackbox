@@ -93,9 +93,12 @@ class _BufferedHTTPResponse:
 
 class EgressMocker:
     """
-    Context manager hooking `urllib.request.urlopen` to capture outbound HTTP traffic,
-    sanitize secrets from URLs/headers/bodies, and synthesize offline Python mock blocks.
+    Context manager hooking outbound HTTP clients (`urllib.request.urlopen` plus optional
+    `requests` and `httpx` when installed) to capture egress traffic, sanitize secrets from
+    URLs/headers/bodies, and synthesize offline Python mock blocks.
     """
+
+    _active_global_mocker: Optional["EgressMocker"] = None
 
     def __init__(
         self,
@@ -105,7 +108,17 @@ class EgressMocker:
         self.wal_ring = wal_ring
         self.max_body_len = max_body_len
         self._orig_urlopen = None
+        self._orig_requests_request = None
+        self._orig_httpx_send = None
+        self._orig_httpx_async_send = None
         self._installed = False
+
+    @classmethod
+    def uninstall_global(cls) -> None:
+        """Uninstalls the currently active global EgressMocker instance, if any."""
+        active = cls._active_global_mocker
+        if active is not None:
+            active.uninstall()
 
     @staticmethod
     def sanitize_url(url: str) -> str:
@@ -133,108 +146,297 @@ class EgressMocker:
         sanitized_query = "&".join(sanitized_pairs)
         return urlunsplit((parts.scheme, netloc, parts.path, sanitized_query, parts.fragment))
 
-    def install(self) -> "EgressMocker":
-        """Installs the `urllib.request.urlopen` interception wrapper."""
+    def install(
+        self,
+        hook_urllib: bool = True,
+        hook_requests: bool = True,
+        hook_httpx: bool = True,
+    ) -> "EgressMocker":
+        """Installs outbound HTTP interception wrappers on stdlib urllib and optional requests/httpx."""
         if self._installed:
             return self
 
-        orig_urlopen = urllib.request.urlopen
-        self._orig_urlopen = orig_urlopen
+        # Avoid stacking wrappers if another EgressMocker instance was left active
+        prev_active = EgressMocker._active_global_mocker
+        if prev_active is not None and prev_active is not self:
+            prev_active.uninstall()
+
         mocker = self
 
-        def _wrapped_urlopen(url_or_req, data=None, timeout=None, *args, **kwargs):
-            if isinstance(url_or_req, urllib.request.Request):
-                raw_url = url_or_req.full_url
-                method = (url_or_req.get_method() or ("POST" if data is not None else "GET")).upper()
-                req_headers = dict(url_or_req.header_items())
-            else:
-                raw_url = str(url_or_req)
-                method = "POST" if data is not None else "GET"
-                req_headers = {}
+        if hook_urllib:
+            orig_urlopen = urllib.request.urlopen
+            self._orig_urlopen = orig_urlopen
 
-            call_kwargs = dict(kwargs)
-            if timeout is not None:
-                call_kwargs["timeout"] = timeout
+            def _wrapped_urlopen(url_or_req, data=None, timeout=None, *args, **kwargs):
+                if isinstance(url_or_req, urllib.request.Request):
+                    raw_url = url_or_req.full_url
+                    method = (url_or_req.get_method() or ("POST" if data is not None else "GET")).upper()
+                    req_headers = dict(url_or_req.header_items())
+                else:
+                    raw_url = str(url_or_req)
+                    method = "POST" if data is not None else "GET"
+                    req_headers = {}
 
-            t0 = time.perf_counter()
-            try:
-                resp = orig_urlopen(url_or_req, data, *args, **call_kwargs)
-            except urllib.error.HTTPError as exc:
-                dur_ms = (time.perf_counter() - t0) * 1000.0
-                err_body = b""
+                call_kwargs = dict(kwargs)
+                if timeout is not None:
+                    call_kwargs["timeout"] = timeout
+
+                t0 = time.perf_counter()
                 try:
-                    err_body = exc.read()
-                except Exception:
-                    pass
+                    resp = orig_urlopen(url_or_req, data, *args, **call_kwargs)
+                except urllib.error.HTTPError as exc:
+                    dur_ms = (time.perf_counter() - t0) * 1000.0
+                    err_body = b""
+                    try:
+                        err_body = exc.read()
+                        # Restore readable stream on HTTPError so callers can still call exc.read()
+                        buf = io.BytesIO(err_body)
+                        exc.fp = buf
+                        exc.file = buf
+                        exc.read = buf.read
+                        exc.readline = buf.readline
+                        exc.readlines = buf.readlines
+                    except Exception:
+                        pass
+                    mocker._record_egress(
+                        method=method,
+                        raw_url=raw_url,
+                        status_code=getattr(exc, "code", 500) or 500,
+                        req_headers=req_headers,
+                        resp_headers=dict(exc.headers.items()) if getattr(exc, "headers", None) else {},
+                        body_bytes=err_body,
+                        duration_ms=dur_ms,
+                        status="error",
+                    )
+                    raise
+                except Exception as exc:
+                    dur_ms = (time.perf_counter() - t0) * 1000.0
+                    mocker._record_egress(
+                        method=method,
+                        raw_url=raw_url,
+                        status_code=0,
+                        req_headers=req_headers,
+                        resp_headers={},
+                        body_bytes=str(exc).encode("utf-8", errors="replace"),
+                        duration_ms=dur_ms,
+                        status="error",
+                    )
+                    raise
+
+                dur_ms = (time.perf_counter() - t0) * 1000.0
+                status_code = getattr(resp, "status", None)
+                if status_code is None and hasattr(resp, "getcode"):
+                    status_code = resp.getcode()
+                resp_headers_obj = getattr(resp, "headers", None)
+                resp_headers_dict = dict(resp_headers_obj.items()) if hasattr(resp_headers_obj, "items") else {}
+                resp_url = resp.geturl() if hasattr(resp, "geturl") else raw_url
+
+                raw_bytes = b""
+                try:
+                    raw_bytes = resp.read()
+                finally:
+                    try:
+                        resp.close()
+                    except Exception:
+                        pass
+
                 mocker._record_egress(
                     method=method,
                     raw_url=raw_url,
-                    status_code=getattr(exc, "code", 500) or 500,
+                    status_code=int(status_code or 200),
                     req_headers=req_headers,
-                    resp_headers=dict(exc.headers.items()) if getattr(exc, "headers", None) else {},
-                    body_bytes=err_body,
+                    resp_headers=resp_headers_dict,
+                    body_bytes=raw_bytes,
                     duration_ms=dur_ms,
-                    status="error",
+                    status="ok" if int(status_code or 200) < 400 else "error",
                 )
-                raise
-            except Exception as exc:
-                dur_ms = (time.perf_counter() - t0) * 1000.0
-                mocker._record_egress(
-                    method=method,
-                    raw_url=raw_url,
-                    status_code=0,
-                    req_headers=req_headers,
-                    resp_headers={},
-                    body_bytes=str(exc).encode("utf-8", errors="replace"),
-                    duration_ms=dur_ms,
-                    status="error",
+                return _BufferedHTTPResponse(
+                    body=raw_bytes,
+                    status=status_code,
+                    headers=resp_headers_obj if resp_headers_obj is not None else Message(),
+                    url=resp_url,
                 )
-                raise
 
-            dur_ms = (time.perf_counter() - t0) * 1000.0
-            status_code = getattr(resp, "status", None)
-            if status_code is None and hasattr(resp, "getcode"):
-                status_code = resp.getcode()
-            resp_headers_obj = getattr(resp, "headers", None)
-            resp_headers_dict = dict(resp_headers_obj.items()) if hasattr(resp_headers_obj, "items") else {}
-            resp_url = resp.geturl() if hasattr(resp, "geturl") else raw_url
+            urllib.request.urlopen = _wrapped_urlopen
 
-            raw_bytes = b""
+        if hook_requests:
             try:
-                raw_bytes = resp.read()
-            finally:
-                try:
-                    resp.close()
-                except Exception:
-                    pass
+                import requests.sessions  # type: ignore
 
-            mocker._record_egress(
-                method=method,
-                raw_url=raw_url,
-                status_code=int(status_code or 200),
-                req_headers=req_headers,
-                resp_headers=resp_headers_dict,
-                body_bytes=raw_bytes,
-                duration_ms=dur_ms,
-                status="ok" if int(status_code or 200) < 400 else "error",
-            )
-            return _BufferedHTTPResponse(
-                body=raw_bytes,
-                status=status_code,
-                headers=resp_headers_obj if resp_headers_obj is not None else Message(),
-                url=resp_url,
-            )
+                orig_req = requests.sessions.Session.request
+                self._orig_requests_request = orig_req
 
-        urllib.request.urlopen = _wrapped_urlopen
+                def _wrapped_requests_request(session_self, method, url, *args, **kwargs):
+                    req_headers = dict(getattr(session_self, "headers", {}) or {})
+                    if isinstance(kwargs.get("headers"), dict):
+                        req_headers.update(kwargs["headers"])
+                    method_up = str(method or "GET").upper()
+                    raw_url = str(url or "")
+                    t0 = time.perf_counter()
+                    try:
+                        resp = orig_req(session_self, method, url, *args, **kwargs)
+                    except Exception as exc:
+                        dur_ms = (time.perf_counter() - t0) * 1000.0
+                        mocker._record_egress(
+                            method=method_up,
+                            raw_url=raw_url,
+                            status_code=0,
+                            req_headers=req_headers,
+                            resp_headers={},
+                            body_bytes=str(exc).encode("utf-8", errors="replace"),
+                            duration_ms=dur_ms,
+                            status="error",
+                        )
+                        raise
+
+                    dur_ms = (time.perf_counter() - t0) * 1000.0
+                    status_code = int(getattr(resp, "status_code", 200) or 200)
+                    resp_headers = dict(getattr(resp, "headers", {}) or {})
+                    try:
+                        body_bytes = resp.content if getattr(resp, "content", None) is not None else b""
+                    except Exception:
+                        body_bytes = b""
+                    mocker._record_egress(
+                        method=method_up,
+                        raw_url=str(getattr(resp, "url", None) or raw_url),
+                        status_code=status_code,
+                        req_headers=req_headers,
+                        resp_headers=resp_headers,
+                        body_bytes=body_bytes,
+                        duration_ms=dur_ms,
+                        status="ok" if status_code < 400 else "error",
+                    )
+                    return resp
+
+                requests.sessions.Session.request = _wrapped_requests_request
+            except ImportError:
+                pass
+
+        if hook_httpx:
+            try:
+                import httpx  # type: ignore
+
+                orig_send = httpx.Client.send
+                orig_async_send = httpx.AsyncClient.send
+                self._orig_httpx_send = orig_send
+                self._orig_httpx_async_send = orig_async_send
+
+                def _wrapped_httpx_send(client_self, request, *args, **kwargs):
+                    raw_url = str(getattr(request, "url", ""))
+                    method_up = str(getattr(request, "method", "GET")).upper()
+                    req_headers = dict(getattr(request, "headers", {}) or {})
+                    t0 = time.perf_counter()
+                    try:
+                        resp = orig_send(client_self, request, *args, **kwargs)
+                    except Exception as exc:
+                        dur_ms = (time.perf_counter() - t0) * 1000.0
+                        mocker._record_egress(
+                            method=method_up,
+                            raw_url=raw_url,
+                            status_code=0,
+                            req_headers=req_headers,
+                            resp_headers={},
+                            body_bytes=str(exc).encode("utf-8", errors="replace"),
+                            duration_ms=dur_ms,
+                            status="error",
+                        )
+                        raise
+
+                    dur_ms = (time.perf_counter() - t0) * 1000.0
+                    status_code = int(getattr(resp, "status_code", 200) or 200)
+                    resp_headers = dict(getattr(resp, "headers", {}) or {})
+                    try:
+                        body_bytes = resp.content or b""
+                    except Exception:
+                        body_bytes = b""
+                    mocker._record_egress(
+                        method=method_up,
+                        raw_url=raw_url,
+                        status_code=status_code,
+                        req_headers=req_headers,
+                        resp_headers=resp_headers,
+                        body_bytes=body_bytes,
+                        duration_ms=dur_ms,
+                        status="ok" if status_code < 400 else "error",
+                    )
+                    return resp
+
+                async def _wrapped_httpx_async_send(client_self, request, *args, **kwargs):
+                    raw_url = str(getattr(request, "url", ""))
+                    method_up = str(getattr(request, "method", "GET")).upper()
+                    req_headers = dict(getattr(request, "headers", {}) or {})
+                    t0 = time.perf_counter()
+                    try:
+                        resp = await orig_async_send(client_self, request, *args, **kwargs)
+                    except Exception as exc:
+                        dur_ms = (time.perf_counter() - t0) * 1000.0
+                        mocker._record_egress(
+                            method=method_up,
+                            raw_url=raw_url,
+                            status_code=0,
+                            req_headers=req_headers,
+                            resp_headers={},
+                            body_bytes=str(exc).encode("utf-8", errors="replace"),
+                            duration_ms=dur_ms,
+                            status="error",
+                        )
+                        raise
+
+                    dur_ms = (time.perf_counter() - t0) * 1000.0
+                    status_code = int(getattr(resp, "status_code", 200) or 200)
+                    resp_headers = dict(getattr(resp, "headers", {}) or {})
+                    try:
+                        body_bytes = resp.content or b""
+                    except Exception:
+                        body_bytes = b""
+                    mocker._record_egress(
+                        method=method_up,
+                        raw_url=raw_url,
+                        status_code=status_code,
+                        req_headers=req_headers,
+                        resp_headers=resp_headers,
+                        body_bytes=body_bytes,
+                        duration_ms=dur_ms,
+                        status="ok" if status_code < 400 else "error",
+                    )
+                    return resp
+
+                httpx.Client.send = _wrapped_httpx_send
+                httpx.AsyncClient.send = _wrapped_httpx_async_send
+            except ImportError:
+                pass
+
         self._installed = True
+        EgressMocker._active_global_mocker = self
         return self
 
     def uninstall(self) -> None:
-        """Restores the original `urllib.request.urlopen` function."""
+        """Restores all patched HTTP client functions."""
         if self._installed and self._orig_urlopen is not None:
             urllib.request.urlopen = self._orig_urlopen
+        if self._installed and self._orig_requests_request is not None:
+            try:
+                import requests.sessions  # type: ignore
+
+                requests.sessions.Session.request = self._orig_requests_request
+            except ImportError:
+                pass
+        if self._installed and self._orig_httpx_send is not None:
+            try:
+                import httpx  # type: ignore
+
+                httpx.Client.send = self._orig_httpx_send
+                if self._orig_httpx_async_send is not None:
+                    httpx.AsyncClient.send = self._orig_httpx_async_send
+            except ImportError:
+                pass
         self._installed = False
         self._orig_urlopen = None
+        self._orig_requests_request = None
+        self._orig_httpx_send = None
+        self._orig_httpx_async_send = None
+        if EgressMocker._active_global_mocker is self:
+            EgressMocker._active_global_mocker = None
 
     def __enter__(self) -> "EgressMocker":
         return self.install()
@@ -253,22 +455,25 @@ class EgressMocker:
         duration_ms: float,
         status: str,
     ) -> None:
-        if not self.wal_ring:
+        if not self.wal_ring or getattr(self.wal_ring, "_closed", False):
             return
-        self.wal_ring.record(
-            event_type="HTTP_CLIENT",
-            payload={
-                "method": method,
-                "url": self.sanitize_url(raw_url),
-                "status_code": status_code,
-                "request_headers": sanitize_headers(req_headers),
-                "response_headers": sanitize_headers(resp_headers),
-                "response_body": sanitize_payload(body_bytes, max_len=self.max_body_len),
-            },
-            source="egress_mocker",
-            duration_ms=round(duration_ms, 3),
-            status=status,
-        )
+        try:
+            self.wal_ring.record(
+                event_type="HTTP_CLIENT",
+                payload={
+                    "method": method,
+                    "url": self.sanitize_url(raw_url),
+                    "status_code": status_code,
+                    "request_headers": sanitize_headers(req_headers),
+                    "response_headers": sanitize_headers(resp_headers),
+                    "response_body": sanitize_payload(body_bytes, max_len=self.max_body_len),
+                },
+                source="egress_mocker",
+                duration_ms=round(duration_ms, 3),
+                status=status,
+            )
+        except Exception:
+            pass
 
     @classmethod
     def extract_egress_stubs(

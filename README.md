@@ -26,9 +26,9 @@ When coding agents (Claude Code, Cursor, Windsurf, Antigravity) encounter runtim
 9. **Pytest Plugin, Auto-Baseline Rotation & GitHub Actions Summary (`pytest_plugin.py`, `baseline.py`, `ci/`):** Native `pytest --blackbox` hook with atomic clean-run baseline promotion (`.blackbox/wal.baseline.sqlite`, opt-out via `--no-auto-baseline`), automatic `.blackbox-diff.md` divergence generation on failure, and collapsible `$GITHUB_STEP_SUMMARY` Markdown exporter.
 10. **Surgical Watch Mode (`watcher.py`):** Zero-dependency `os.stat` source watcher (`blackbox watch`) that selects and runs only AST-impacted tests on edits, rotating baselines on pass and compiling crash artifacts on failure.
 11. **Async TraceContext, N+1 SQL & Flake Analyzer (`context.py`, `perf_detector.py`, `flake_analyzer.py`):** `contextvars`-isolated async request tracing across `asyncio.gather`, N+1 SQL fingerprint clustering (`## Performance & N+1 Query Diagnostics` in `.blackbox.md`), baseline latency regression detection, and non-determinism/flakiness classification (`blackbox diagnose-perf`).
-12. **Offline Egress Mocker, Resource Profiler & Autonomous Heal Planner (`egress_mocker.py`, `resource_profiler.py`, `heal_planner.py`):** Sanitized `urllib.request.urlopen` egress capture with `unittest.mock` offline stub injection into `CrashReproducer`, stdlib `tracemalloc` + `gc` + `/proc/self/fd` memory profiling (`## Resource & Memory Footprint` in `.blackbox.md`), and deterministic 4-step repair planning (`blackbox heal-plan`).
-13. **Unified MCP Stack Provisioner & Operational Incident Compiler (`stack.py`, `autopsy.py`):** Non-destructive client stack config provisioning (`blackbox init-stack`) linking `blackbox-mcp` and the 6 Genesis MCP servers (`v2.1.0`) to one WAL, cross-server telemetry diagnostics (`diagnose_mcp_ecosystem`), `MCP_TOOL` timeline rendering, and `# ⚠️ BLACKBOX OPERATIONAL INCIDENT CAPSULE` generation for non-exception tool errors.
-14. **Native MCP Server & Live SSE Web Inspector (`mcp_server.py`, `ui/`):** Stdio MCP server (`blackbox-mcp`) exposing 15 diagnostic tools (including `get_full_incident_context`, `diagnose_performance_and_flakiness`, `get_autonomous_heal_plan`, and `diagnose_mcp_ecosystem`) alongside a localhost timeline viewer with live Server-Sent Events (SSE) streaming (`GET /api/live`).
+12. **Offline Egress Mocker, Resource Profiler & Autonomous Heal Planner (`egress_mocker.py`, `resource_profiler.py`, `heal_planner.py`):** Sanitized outbound HTTP capture (`urllib.request.urlopen`, plus optional `requests` and `httpx` when installed) automatically wired into `blackbox record`, `auto_instrument()`, and `pytest --blackbox` with `unittest.mock` offline stub injection into `CrashReproducer`, stdlib `tracemalloc` + `gc` + `/proc/self/fd` memory profiling (`--profile` / `--blackbox-profile`), and deterministic 4-step repair planning (`blackbox heal-plan`).
+13. **Unified MCP Stack Provisioner, Doctor & Operational Incident Compiler (`stack.py`, `autopsy.py`):** Non-destructive client stack config provisioning (`blackbox init-stack` supporting `cursor`, `claude`, `claude-code`, `windsurf`, `vscode`, and `antigravity`) linking `blackbox-mcp` and the 6 Genesis MCP servers (`v2.1.0`) to one WAL, environment diagnostics (`blackbox doctor`), cross-server telemetry diagnostics (`blackbox ecosystem` / `diagnose_mcp_ecosystem`), `MCP_TOOL` timeline rendering, and `# ⚠️ BLACKBOX OPERATIONAL INCIDENT CAPSULE` generation for non-exception tool errors.
+14. **Native MCP Server (Tools + Resources + Prompts) & Live SSE Web Inspector (`mcp_server.py`, `ui/`):** Stdio MCP server (`blackbox-mcp`) exposing 15 diagnostic tools, 4 MCP resources (`blackbox://autopsy/latest`, `blackbox://heal-plan/latest`, `blackbox://ecosystem/health`, `blackbox://timeline/recent`), and 2 MCP prompts (`repair-latest-crash`, `audit-mcp-stack`), alongside a localhost timeline viewer with live Server-Sent Events (SSE), timeline filters, ZIP bundle export, and tabbed Ecosystem / Performance / Heal Plan diagnostics.
 
 ---
 
@@ -63,14 +63,18 @@ flowchart LR
 
 ### 1. Installation
 
+Zero external runtime dependencies (pure Python 3.10+ standard library):
+
 ```bash
 pip install genesis-blackbox
+# Optional pytest integration plugin:
+pip install "genesis-blackbox[pytest]"
 ```
 
 ### 2. Record Any Python Command or Service
 
 ```bash
-blackbox record -- python app.py
+blackbox record [--profile] [--capture-sql] [--no-egress-mock] -- python app.py
 ```
 
 Or attach inside application code with one line:
@@ -93,10 +97,10 @@ instrument_engine(sqlalchemy_engine)
 
 ### 3. Pytest Plugin, Auto-Baseline & Surgical Watch Mode
 
-Capture autopsies, standalone reproduction scripts, and automatic clean-run baseline snapshots (`wal.baseline.sqlite`):
+Capture autopsies, standalone reproduction scripts, egress stubs, optional memory/FD profiling, and automatic clean-run baseline snapshots (`wal.baseline.sqlite`):
 
 ```bash
-pytest --blackbox [--no-auto-baseline]
+pytest --blackbox [--blackbox-profile] [--no-egress-mock] [--no-auto-baseline]
 ```
 
 Monitor source files and surgically run only impacted tests on modification:
@@ -149,6 +153,13 @@ blackbox init-rules --type claude
 
 # Provision unified MCP stack config sharing one WAL database across all 7 Genesis servers
 blackbox init-stack --client cursor [--output .cursor/mcp.json] [--db .blackbox/wal.sqlite]
+# Supported clients: cursor, claude, claude-code, windsurf, vscode, antigravity
+
+# Diagnose cross-server Genesis MCP telemetry from the shared WAL
+blackbox ecosystem [--db .blackbox/wal.sqlite] [--json]
+
+# Verify runtime, WAL health, Node/Git, and Genesis MCP stack readiness
+blackbox doctor [--db .blackbox/wal.sqlite] [--root .] [--json]
 
 # Launch the localhost timeline and autopsy web inspector with live SSE streaming
 blackbox ui --port 8765 --no-browser
@@ -158,7 +169,7 @@ blackbox ui --port 8765 --no-browser
 
 ## Interactive Examples & Benchmarks (`examples/`)
 
-Self-contained executable demonstrations and benchmarks covering the primary real-world workflows in v0.2.0:
+Self-contained executable demonstrations covering the primary real-world workflows through v1.0.0:
 
 ### 1. Python Time-Travel SQL & State Divergence (`examples/01_python_time_travel_diff/`)
 Executes an order checkout pipeline across two consecutive runs (healthy baseline vs failing run with silent discount multiplier mutation to `None`). Invokes `CausalCrashCompiler` (`.blackbox.md`) and `StateDiffer` (`.blackbox-diff.md`) to pinpoint the exact divergence point and failing database constraint.
@@ -176,6 +187,18 @@ python examples/02_node_ts_async_crash/run_demo.py
 Executes the full 5-phase autonomous AI agent repair lifecycle inside an isolated sandbox: records a crashing target (`run_target`), synthesizes reproduction test (`CrashReproducer`), generates context-dense prompt packet (`PromptSynthesizer`), validates candidate unified diff patch with guaranteed rollback safety (`PatchValidator.evaluate_patch`), and issues cryptographic verification receipt (`CausalVerifier` -> `.blackbox-resolved.md`).
 ```bash
 python examples/03_autonomous_patch_loop/run_demo.py
+```
+
+### 4. Async TraceContext, N+1 SQL & Offline Egress Heal Loop (`examples/04_async_n1_egress_heal_loop/`)
+Executes an async order workflow against a local ephemeral `HTTPServer` with `TraceContext`, `EgressMocker`, `ResourceProfiler`, and `SqlInterceptor` active. Proves automatic URL secret redaction, N+1 SQL detection, offline `unittest.mock` stub synthesis, and 4-step `AutonomousHealPlanner` generation.
+```bash
+python examples/04_async_n1_egress_heal_loop/run_demo.py
+```
+
+### 5. Genesis MCP Stack Operational Incident (`examples/05_genesis_mcp_stack_incident/`)
+Simulates multi-server `MCP_TOOL` telemetry (`pgsafe-mcp`, `sysflow-mcp`, `crawlengine-mcp`, `browserbridge-mcp`) sharing one WAL, compiling `# ⚠️ BLACKBOX OPERATIONAL INCIDENT CAPSULE` and cross-server ecosystem health diagnostics.
+```bash
+python examples/05_genesis_mcp_stack_incident/run_demo.py
 ```
 
 ---

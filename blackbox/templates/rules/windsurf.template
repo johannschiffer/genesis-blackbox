@@ -1,13 +1,13 @@
-# Genesis Blackbox v0.7.0 Integration Directives for Windsurf / Cascade
+# Genesis Blackbox v1.0.0 Integration Directives for Windsurf / Cascade
 
-When resolving runtime exceptions, operational failures, or investigating regressions, execute the complete Genesis Blackbox v0.7.0 autonomous workflow:
+When resolving runtime exceptions, operational failures, or investigating regressions, execute the complete Genesis Blackbox v1.0.0 autonomous workflow:
 
 0. **1-Call Context, Ecosystem Diagnostics, Autonomous Heal Plan, Offline Mocks & Perf Diagnostics:**
-   - Call MCP `get_full_incident_context` to fetch autopsy, baseline diff, reproduction test, impacted tests, `performance_and_flakiness`, `egress_stubs`, `resource_profile`, and `mcp_ecosystem` in one call.
-   - Call MCP `diagnose_mcp_ecosystem` to audit per-server error rates and security guard blocks across connected Genesis MCP servers, or run `blackbox init-stack --client windsurf` to provision the shared WAL stack.
+   - Call MCP `get_full_incident_context` (or read MCP resources `blackbox://autopsy/latest`, `blackbox://heal-plan/latest`, `blackbox://ecosystem/health`) to fetch autopsy, baseline diff, reproduction test, impacted tests, `performance_and_flakiness`, `egress_stubs`, `resource_profile`, and `mcp_ecosystem` in one call.
+   - Call MCP `diagnose_mcp_ecosystem` (or CLI `blackbox ecosystem`) to audit per-server error rates and security guard blocks across connected Genesis MCP servers, run `blackbox init-stack --client windsurf` to provision the shared WAL stack, and `blackbox doctor` to verify environment health.
    - Run `blackbox heal-plan` (or MCP `get_autonomous_heal_plan`) to obtain a deterministic 4-step repair plan including offline `EgressMocker` HTTP stubs and `ResourceProfiler` memory/FD telemetry.
    - Run `blackbox diagnose-perf` (or MCP `diagnose_performance_and_flakiness`) to isolate N+1 SQL loops, latency regressions, and flaky test causes across `TraceContext`-isolated async spans.
-   - Run `pytest --blackbox` or `blackbox watch` for automatic clean baseline rotation (`.blackbox/wal.baseline.sqlite`, opt-out via `--no-auto-baseline`) and automatic `.blackbox-diff.md` divergence reporting on crash.
+   - Run `pytest --blackbox [--blackbox-profile]` or `blackbox watch` for automatic clean baseline rotation (`.blackbox/wal.baseline.sqlite`, opt-out via `--no-auto-baseline`) and automatic `.blackbox-diff.md` divergence reporting on crash.
 
 1. **Autopsy & Time-Travel Diff:**
    - Execute `blackbox autopsy` (or MCP `get_crash_autopsy`) to inspect root-cause frames, local variables, and timeline.

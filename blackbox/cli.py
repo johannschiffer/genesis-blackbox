@@ -42,6 +42,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     rec_parser = subparsers.add_parser("record", help="Execute command or record event into flight recorder")
     rec_parser.add_argument("--db", default=".blackbox/wal.sqlite", help="Path to WAL ring-buffer database")
     rec_parser.add_argument("--no-auto-baseline", action="store_true", default=False, help="Disable automatic promotion of clean runs to baseline WAL")
+    rec_parser.add_argument("--profile", action="store_true", default=False, help="Enable stdlib ResourceProfiler (tracemalloc + FD) capture")
+    rec_parser.add_argument("--no-egress-mock", action="store_true", default=False, help="Disable automatic outbound HTTP egress recording")
+    rec_parser.add_argument("--capture-sql", action="store_true", default=False, help="Automatically trace global sqlite3 connections")
     rec_parser.add_argument("--type", help="Manual event type (HTTP_REQ, SQL_QUERY, LOG, etc.)")
     rec_parser.add_argument("--payload", help="JSON payload string for manual recording")
     rec_parser.add_argument("--source", default="cli", help="Source identifier")
@@ -151,9 +154,21 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # Subcommand: init-stack
     stack_parser = subparsers.add_parser("init-stack", help="Provision unified MCP configuration for Genesis Blackbox and the 6 Genesis MCP servers")
-    stack_parser.add_argument("--client", choices=["cursor", "claude", "windsurf"], default="cursor", help="Target MCP client (default: cursor)")
+    stack_parser.add_argument("--client", choices=["cursor", "claude", "claude-code", "windsurf", "vscode", "antigravity"], default="cursor", help="Target MCP client (default: cursor)")
     stack_parser.add_argument("--output", default=None, help="Custom output file path for MCP JSON configuration")
     stack_parser.add_argument("--db", default=".blackbox/wal.sqlite", help="Shared SQLite WAL database path (default: .blackbox/wal.sqlite)")
+
+    # Subcommand: ecosystem
+    eco_parser = subparsers.add_parser("ecosystem", help="Diagnose cross-server WAL telemetry across Genesis MCP servers")
+    eco_parser.add_argument("--db", default=".blackbox/wal.sqlite", help="Path to WAL database (default: .blackbox/wal.sqlite)")
+    eco_parser.add_argument("--limit", type=int, default=500, help="Maximum recent WAL events to analyze (default: 500)")
+    eco_parser.add_argument("--json", action="store_true", help="Output structured JSON instead of markdown")
+
+    # Subcommand: doctor
+    doc_parser = subparsers.add_parser("doctor", help="Check runtime environment, WAL health, and Genesis MCP stack readiness")
+    doc_parser.add_argument("--db", default=".blackbox/wal.sqlite", help="Path to WAL database (default: .blackbox/wal.sqlite)")
+    doc_parser.add_argument("--root", default=".", help="Project root directory (default: .)")
+    doc_parser.add_argument("--json", action="store_true", help="Output structured JSON instead of markdown")
 
     args = parser.parse_args(argv)
 
@@ -166,7 +181,14 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         # Case 1: Target command execution
         if cmd:
-            return run_target(cmd, db_path=args.db, auto_baseline=not args.no_auto_baseline)
+            return run_target(
+                cmd,
+                db_path=args.db,
+                auto_baseline=not args.no_auto_baseline,
+                capture_egress=not args.no_egress_mock,
+                profile_resources=args.profile,
+                capture_sql=args.capture_sql,
+            )
 
         # Case 2: Manual event payload recording
         if args.type and args.payload:
@@ -479,6 +501,24 @@ def main(argv: Optional[List[str]] = None) -> int:
             db_path=args.db,
         )
         print(f"[Genesis-Blackbox] Unified Genesis MCP stack ({res['client']}) written to {res['config_path']}")
+        return 0
+
+    elif args.command == "ecosystem":
+        from .stack import GenesisStackManager
+        report = GenesisStackManager().diagnose_ecosystem(db_path=args.db, limit=args.limit)
+        if args.json:
+            print(json.dumps(report, indent=2, default=str))
+        else:
+            print(report["markdown_report"])
+        return 0
+
+    elif args.command == "doctor":
+        from .stack import GenesisStackManager
+        report = GenesisStackManager().run_doctor(db_path=args.db, root_dir=args.root)
+        if args.json:
+            print(json.dumps(report, indent=2, default=str))
+        else:
+            print(report["markdown_report"])
         return 0
 
     return 0

@@ -6,6 +6,7 @@ Zero external dependencies. Powered by Python standard library http.server.
 import os
 import json
 import sqlite3
+import tempfile
 import threading
 import urllib.parse
 import webbrowser
@@ -14,6 +15,7 @@ from socketserver import ThreadingMixIn
 from typing import Optional
 
 from .. import __version__
+from ..recorder.baseline import BaselineManager
 from ..recorder.wal_ring import WalRingBuffer
 from ..ast_engine.graph import CodebaseGraph
 from ..compiler.autopsy import CausalCrashCompiler
@@ -44,6 +46,9 @@ EMBEDDED_HTML = """<!DOCTYPE html>
       --ok-bg: #0f2419;
       --ok-border: #26663b;
       --ok-text: #56d364;
+      --warn-bg: #2a210d;
+      --warn-border: #9e6a03;
+      --warn-text: #f0b849;
       --tag-http-bg: #12263f;
       --tag-http-text: #79c0ff;
       --tag-sql-bg: #0f2419;
@@ -71,6 +76,9 @@ EMBEDDED_HTML = """<!DOCTYPE html>
       --ok-bg: #dafbe1;
       --ok-border: #82e29b;
       --ok-text: #116329;
+      --warn-bg: #fff8c5;
+      --warn-border: #d4a72c;
+      --warn-text: #6e4900;
       --tag-http-bg: #ddf4ff;
       --tag-http-text: #0550ae;
       --tag-sql-bg: #dafbe1;
@@ -182,6 +190,11 @@ EMBEDDED_HTML = """<!DOCTYPE html>
       border-color: var(--ok-border);
     }
 
+    .crash-banner.warning {
+      background: var(--warn-bg);
+      border-color: var(--warn-border);
+    }
+
     .crash-banner h2 {
       font-size: 1rem;
       font-weight: 600;
@@ -191,6 +204,10 @@ EMBEDDED_HTML = """<!DOCTYPE html>
 
     .crash-banner.healthy h2 {
       color: var(--ok-text);
+    }
+
+    .crash-banner.warning h2 {
+      color: var(--warn-text);
     }
 
     .crash-desc {
@@ -348,6 +365,72 @@ EMBEDDED_HTML = """<!DOCTYPE html>
       color: var(--text-muted);
       margin-right: 6px;
     }
+
+    .filter-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface-subtle);
+      align-items: center;
+    }
+
+    .filter-input {
+      background: var(--code-bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      min-height: 44px;
+      padding: 6px 10px;
+      font-size: 0.85rem;
+    }
+
+    .filter-input:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .tab-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .tab-btn {
+      background: var(--btn-bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      min-height: 44px;
+      padding: 8px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-weight: 500;
+    }
+
+    .tab-btn[aria-selected="true"] {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: var(--code-bg);
+    }
+
+    .tab-btn:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .diag-panel {
+      padding: 16px;
+    }
+
+    .stat-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      margin-bottom: 12px;
+      font-size: 0.88rem;
+    }
   </style>
 </head>
 <body>
@@ -358,8 +441,9 @@ EMBEDDED_HTML = """<!DOCTYPE html>
         <span id="conn-badge" class="badge-live">Flight Recorder Live</span>
       </div>
       <div class="header-actions">
+        <button id="bundle-btn" type="button" class="action-btn" onclick="window.location.href='/api/bundle/download'">Download Bundle (.zip)</button>
         <button id="theme-btn" type="button" class="action-btn" aria-pressed="false" onclick="toggleTheme()">Light Theme</button>
-        <button id="refresh-btn" type="button" class="action-btn" onclick="fetchState()">Refresh Feed</button>
+        <button id="refresh-btn" type="button" class="action-btn" onclick="refreshAll()">Refresh Feed</button>
       </div>
     </header>
 
@@ -374,6 +458,22 @@ EMBEDDED_HTML = """<!DOCTYPE html>
           <div class="card-header">
             <span id="timeline-heading">Execution Timeline (Latest Transactions)</span>
             <span id="timeline-count" class="meta-count">0 events</span>
+          </div>
+          <div class="filter-bar">
+            <label for="filter-type" class="sr-status">Type</label>
+            <select id="filter-type" class="filter-input" onchange="fetchState()">
+              <option value="">All Types</option>
+              <option value="EXCEPTION">EXCEPTION</option>
+              <option value="HTTP_CLIENT">HTTP_CLIENT</option>
+              <option value="HTTP_REQ">HTTP_REQ</option>
+              <option value="sql_query">sql_query</option>
+              <option value="MCP_TOOL">MCP_TOOL</option>
+              <option value="RESOURCE_PROFILE">RESOURCE_PROFILE</option>
+              <option value="SUBPROCESS">SUBPROCESS</option>
+            </select>
+            <label for="filter-source" class="sr-status">Source</label>
+            <input id="filter-source" type="text" class="filter-input" placeholder="Filter source (e.g. pgsafe-mcp)" onchange="fetchState()">
+            <button id="filter-reset-btn" type="button" class="action-btn" onclick="resetTimelineFilters()">Reset</button>
           </div>
           <table class="timeline-table">
             <thead>
@@ -437,6 +537,46 @@ EMBEDDED_HTML = """<!DOCTYPE html>
           </div>
         </div>
       </section>
+
+      <section class="card" aria-labelledby="diag-heading" style="margin-top: 20px;">
+        <div class="card-header">
+          <span id="diag-heading">Diagnostics, Performance &amp; MCP Ecosystem</span>
+          <div class="tab-bar" role="tablist" aria-label="Diagnostic Views">
+            <button id="tab-eco" type="button" class="tab-btn" role="tab" aria-selected="true" aria-controls="panel-eco" onclick="switchDiagTab('eco')">MCP Ecosystem</button>
+            <button id="tab-perf" type="button" class="tab-btn" role="tab" aria-selected="false" aria-controls="panel-perf" onclick="switchDiagTab('perf')">Performance &amp; Flakes</button>
+            <button id="tab-heal" type="button" class="tab-btn" role="tab" aria-selected="false" aria-controls="panel-heal" onclick="switchDiagTab('heal')">Autonomous Heal Plan</button>
+          </div>
+        </div>
+        <div id="panel-eco" class="diag-panel" role="tabpanel" aria-labelledby="tab-eco">
+          <div class="stat-row">
+            <div><strong>Events Analyzed:</strong> <span id="eco-events" class="mono">0</span></div>
+            <div><strong>Active Sources:</strong> <span id="eco-sources" class="mono">0</span></div>
+            <div><strong>Operational Errors:</strong> <span id="eco-errors" class="mono">0</span></div>
+            <div><strong>Security Blocks:</strong> <span id="eco-blocks" class="mono">0</span></div>
+          </div>
+          <div style="overflow-x: auto;">
+            <table class="timeline-table">
+              <thead>
+                <tr>
+                  <th scope="col">Server Source</th>
+                  <th scope="col">Events</th>
+                  <th scope="col">Errors / Blocks</th>
+                  <th scope="col">Avg / Max Latency</th>
+                </tr>
+              </thead>
+              <tbody id="eco-body">
+                <tr><td colspan="4" class="empty-cell">No MCP server telemetry recorded yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div id="panel-perf" class="diag-panel" role="tabpanel" aria-labelledby="tab-perf" hidden>
+          <pre id="perf-text">Loading performance and flakiness report...</pre>
+        </div>
+        <div id="panel-heal" class="diag-panel" role="tabpanel" aria-labelledby="tab-heal" hidden>
+          <pre id="heal-text">Loading autonomous heal plan...</pre>
+        </div>
+      </section>
     </main>
   </div>
 
@@ -486,13 +626,53 @@ EMBEDDED_HTML = """<!DOCTYPE html>
       tbody.appendChild(tr);
     }
 
+    function resetTimelineFilters() {
+      const typeEl = document.getElementById('filter-type');
+      const srcEl = document.getElementById('filter-source');
+      if (typeEl) typeEl.value = '';
+      if (srcEl) srcEl.value = '';
+      fetchState();
+    }
+
+    function switchDiagTab(tabKey) {
+      const keys = ['eco', 'perf', 'heal'];
+      for (const k of keys) {
+        const btn = document.getElementById('tab-' + k);
+        const panel = document.getElementById('panel-' + k);
+        const active = k === tabKey;
+        if (btn) btn.setAttribute('aria-selected', active ? 'true' : 'false');
+        if (panel) panel.hidden = !active;
+      }
+    }
+
+    document.addEventListener('keydown', function(ev) {
+      const active = document.activeElement;
+      if (!active || active.getAttribute('role') !== 'tab') return;
+      const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+      const idx = tabs.indexOf(active);
+      if (idx === -1) return;
+      let nextIdx = -1;
+      if (ev.key === 'ArrowRight') nextIdx = (idx + 1) % tabs.length;
+      if (ev.key === 'ArrowLeft') nextIdx = (idx - 1 + tabs.length) % tabs.length;
+      if (nextIdx >= 0) {
+        ev.preventDefault();
+        tabs[nextIdx].focus();
+        tabs[nextIdx].click();
+      }
+    });
+
     async function fetchState() {
       const banner = document.getElementById('crash-banner');
       const badge = document.getElementById('conn-badge');
       const tbody = document.getElementById('timeline-body');
+      const typeFilter = (document.getElementById('filter-type') || {}).value || '';
+      const srcFilter = ((document.getElementById('filter-source') || {}).value || '').trim();
+      const params = new URLSearchParams({ limit: '30' });
+      if (typeFilter) params.set('event_type', typeFilter);
+      if (srcFilter) params.set('source', srcFilter);
       try {
         const [timeRes, autoRes] = await Promise.all([
-          fetch('/api/timeline?limit=30'),
+          fetch('/api/timeline?' + params.toString()),
           fetch('/api/autopsy')
         ]);
         if (!timeRes.ok || !autoRes.ok) {
@@ -511,6 +691,10 @@ EMBEDDED_HTML = """<!DOCTYPE html>
             (autoData.exception_message || '') +
             ' in ' + (autoData.culprit_file || 'unknown') +
             ':' + (autoData.culprit_line || '');
+        } else if (autoData.has_operational_incident) {
+          banner.className = 'crash-banner warning';
+          document.getElementById('crash-title').textContent = 'Operational Incident Detected in WAL';
+          document.getElementById('crash-desc').textContent = 'Non-exception MCP tool or operational error captured. Inspect Autopsy & MCP Ecosystem tabs.';
         } else {
           banner.className = 'crash-banner healthy';
           document.getElementById('crash-title').textContent = 'Operational: Normal Execution State';
@@ -707,9 +891,65 @@ EMBEDDED_HTML = """<!DOCTYPE html>
       tbody.appendChild(tr);
     }
 
+    async function fetchDiagnostics() {
+      try {
+        const [ecoRes, perfRes, healRes] = await Promise.all([
+          fetch('/api/ecosystem'),
+          fetch('/api/perf'),
+          fetch('/api/heal-plan')
+        ]);
+        if (ecoRes.ok) {
+          const eco = await ecoRes.json();
+          document.getElementById('eco-events').textContent = String(eco.total_events_analyzed || 0);
+          document.getElementById('eco-sources').textContent = String(eco.active_sources_count || 0);
+          document.getElementById('eco-errors').textContent = String(eco.total_errors || 0);
+          document.getElementById('eco-blocks').textContent = String(eco.total_security_blocks || 0);
+          const ecoBody = document.getElementById('eco-body');
+          const servers = eco.servers || {};
+          const keys = Object.keys(servers);
+          if (keys.length === 0) {
+            renderEmptyRow(ecoBody, 'No MCP server telemetry recorded yet.');
+          } else {
+            const frag = document.createDocumentFragment();
+            for (const src of keys) {
+              const st = servers[src];
+              const tr = document.createElement('tr');
+              const tdSrc = document.createElement('td');
+              tdSrc.className = 'mono';
+              tdSrc.textContent = src;
+              const tdEv = document.createElement('td');
+              tdEv.className = 'mono';
+              tdEv.textContent = String(st.total_events || 0);
+              const tdErr = document.createElement('td');
+              tdErr.className = 'mono';
+              tdErr.textContent = (st.error_events || 0) + ' err / ' + (st.security_blocks || 0) + ' blk';
+              const tdLat = document.createElement('td');
+              tdLat.className = 'mono';
+              tdLat.textContent = Number(st.avg_duration_ms || 0).toFixed(2) + 'ms / ' + Number(st.max_duration_ms || 0).toFixed(2) + 'ms';
+              tr.appendChild(tdSrc);
+              tr.appendChild(tdEv);
+              tr.appendChild(tdErr);
+              tr.appendChild(tdLat);
+              frag.appendChild(tr);
+            }
+            ecoBody.replaceChildren(frag);
+          }
+        }
+        if (perfRes.ok) {
+          const perf = await perfRes.json();
+          document.getElementById('perf-text').textContent = perf.markdown_report || JSON.stringify(perf, null, 2);
+        }
+        if (healRes.ok) {
+          const heal = await healRes.json();
+          document.getElementById('heal-text').textContent = heal.markdown_plan || JSON.stringify(heal, null, 2);
+        }
+      } catch (_) {}
+    }
+
     function refreshAll() {
       fetchState();
       fetchDiff();
+      fetchDiagnostics();
     }
 
     function initLiveStream() {
@@ -826,6 +1066,14 @@ class BlackboxUIRequestHandler(BaseHTTPRequestHandler):
             self._handle_api_diff_runs(query)
         elif path == "/api/live":
             self._handle_api_live(query)
+        elif path == "/api/perf":
+            self._handle_api_perf()
+        elif path == "/api/heal-plan":
+            self._handle_api_heal_plan()
+        elif path == "/api/ecosystem":
+            self._handle_api_ecosystem()
+        elif path == "/api/bundle/download":
+            self._handle_api_bundle_download()
         elif path == "/api/status":
             self._handle_api_status()
         else:
@@ -857,14 +1105,79 @@ class BlackboxUIRequestHandler(BaseHTTPRequestHandler):
             except ValueError:
                 limit = 50
         event_type = query.get("event_type", [None])[0]
+        source = query.get("source", [None])[0]
+        trace_id = query.get("trace_id", [None])[0]
+        status_filter = query.get("status", [None])[0]
 
-        events = self.wal_ring.query_recent(limit=limit, event_type=event_type)
+        fetch_limit = max(limit * 4, 200) if status_filter else limit
+        events = self.wal_ring.query_recent(
+            limit=fetch_limit,
+            event_type=event_type,
+            trace_id=trace_id,
+            source=source,
+        )
+        if status_filter:
+            events = [
+                e for e in events if str(e.get("status", "")).lower() == status_filter.lower()
+            ][:limit]
         resp_data = {
             "total_events": len(events),
-            "filter": {"limit": limit, "event_type": event_type},
+            "filter": {
+                "limit": limit,
+                "event_type": event_type,
+                "source": source,
+                "trace_id": trace_id,
+                "status": status_filter,
+            },
             "events": events
         }
         self._send_json(resp_data)
+
+    def _handle_api_perf(self):
+        from ..compiler.flake_analyzer import FlakeAnalyzer
+        baseline_path = BaselineManager.default_baseline_path(self.server.db_path)
+        report = FlakeAnalyzer().analyze_flakiness(
+            wal_path=self.server.db_path,
+            baseline_path=baseline_path,
+        )
+        self._send_json(report)
+
+    def _handle_api_heal_plan(self):
+        from ..compiler.heal_planner import AutonomousHealPlanner
+        baseline_path = BaselineManager.default_baseline_path(self.server.db_path)
+        plan = AutonomousHealPlanner().build_heal_plan(
+            wal_path=self.server.db_path,
+            baseline_path=baseline_path,
+        )
+        self._send_json(plan)
+
+    def _handle_api_ecosystem(self):
+        from ..stack import GenesisStackManager
+        report = GenesisStackManager().diagnose_ecosystem(db_path=self.server.db_path)
+        self._send_json(report)
+
+    def _handle_api_bundle_download(self):
+        from ..recorder.bundle import CrashBundler
+        fd, tmp_zip = tempfile.mkstemp(prefix="blackbox_bundle_", suffix=".zip")
+        os.close(fd)
+        try:
+            bundler = CrashBundler(db_path=self.server.db_path, repo_root=".")
+            bundler.create_bundle(output_zip=tmp_zip, db_path=self.server.db_path)
+            with open(tmp_zip, "rb") as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", 'attachment; filename="blackbox_incident_bundle.zip"')
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(data)
+        finally:
+            try:
+                if os.path.exists(tmp_zip):
+                    os.unlink(tmp_zip)
+            except OSError:
+                pass
 
     def _handle_api_autopsy(self):
         recent_exceptions = self.wal_ring.query_recent(limit=1, event_type="EXCEPTION")

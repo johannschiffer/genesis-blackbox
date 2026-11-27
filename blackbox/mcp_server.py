@@ -649,6 +649,122 @@ class BlackboxMCPServer:
             eid = ring.record(event_type=event_type, payload=payload, source=source)
         return {"status": "recorded", "event_id": eid}
 
+    def list_resources(self) -> List[Dict[str, Any]]:
+        """Lists MCP resources exposed for direct context inspection."""
+        return [
+            {
+                "uri": "blackbox://autopsy/latest",
+                "name": "Latest Crash Autopsy",
+                "description": "Compiled .blackbox.md causal autopsy capsule from latest crash or operational incident.",
+                "mimeType": "text/markdown",
+            },
+            {
+                "uri": "blackbox://heal-plan/latest",
+                "name": "Autonomous Heal Plan",
+                "description": "Deterministic 4-step repair plan combining crash, egress stubs, perf/memory, and impacted tests.",
+                "mimeType": "text/markdown",
+            },
+            {
+                "uri": "blackbox://ecosystem/health",
+                "name": "Genesis MCP Ecosystem Health",
+                "description": "Per-server invocation telemetry, latencies, security blocks, and operational errors across Genesis MCP servers.",
+                "mimeType": "application/json",
+            },
+            {
+                "uri": "blackbox://timeline/recent",
+                "name": "Recent WAL Execution Timeline",
+                "description": "Latest 50 events recorded in the circular SQLite WAL ring-buffer.",
+                "mimeType": "application/json",
+            },
+        ]
+
+    def read_resource(self, uri: str) -> Optional[Dict[str, Any]]:
+        """Reads an MCP resource URI and returns contents item, or None if unknown."""
+        if uri == "blackbox://autopsy/latest":
+            return {
+                "uri": uri,
+                "mimeType": "text/markdown",
+                "text": self.get_crash_autopsy(db_path=self.default_db_path),
+            }
+        if uri == "blackbox://heal-plan/latest":
+            plan = self.get_autonomous_heal_plan(db_path=self.default_db_path)
+            return {
+                "uri": uri,
+                "mimeType": "text/markdown",
+                "text": plan.get("markdown_plan", ""),
+            }
+        if uri == "blackbox://ecosystem/health":
+            eco = self.diagnose_mcp_ecosystem(db_path=self.default_db_path)
+            return {
+                "uri": uri,
+                "mimeType": "application/json",
+                "text": json.dumps(eco, indent=2, default=str),
+            }
+        if uri == "blackbox://timeline/recent":
+            tl = self.query_execution_timeline(limit=50, db_path=self.default_db_path)
+            return {
+                "uri": uri,
+                "mimeType": "application/json",
+                "text": json.dumps(tl, indent=2, default=str),
+            }
+        return None
+
+    def list_prompts(self) -> List[Dict[str, Any]]:
+        """Lists MCP prompt templates exposed to AI clients."""
+        return [
+            {
+                "name": "repair-latest-crash",
+                "description": "Synthesize causal autopsy and 4-step heal plan to fix the latest failure on attempt 1.",
+                "arguments": [
+                    {
+                        "name": "db_path",
+                        "description": "Optional SQLite WAL database path",
+                        "required": False,
+                    }
+                ],
+            },
+            {
+                "name": "audit-mcp-stack",
+                "description": "Audit cross-server Genesis MCP telemetry, security blocks, and operational errors.",
+                "arguments": [
+                    {
+                        "name": "db_path",
+                        "description": "Optional SQLite WAL database path",
+                        "required": False,
+                    }
+                ],
+            },
+        ]
+
+    def get_prompt(self, name: str, arguments: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        """Renders an MCP prompt with live WAL telemetry."""
+        args = arguments or {}
+        target_db = str(args.get("db_path") or self.default_db_path)
+        if name == "repair-latest-crash":
+            autopsy = self.get_crash_autopsy(db_path=target_db)
+            plan = self.get_autonomous_heal_plan(db_path=target_db)
+            text = (
+                "Follow the Genesis Blackbox autonomous repair loop using the live telemetry below.\n\n"
+                f"{autopsy}\n\n---\n\n{plan.get('markdown_plan', '')}"
+            )
+            return {
+                "description": "Repair latest crash using Blackbox autopsy and 4-step heal plan",
+                "messages": [{"role": "user", "content": {"type": "text", "text": text}}],
+            }
+        if name == "audit-mcp-stack":
+            eco = self.diagnose_mcp_ecosystem(db_path=target_db)
+            text = (
+                "Audit the Genesis MCP Ecosystem telemetry report below, highlighting blocked operations, "
+                "high latency tools, and operational errors.\n\n"
+                f"{eco.get('markdown_report', '')}\n\n```json\n"
+                f"{json.dumps(eco.get('operational_incidents', []), indent=2, default=str)}\n```"
+            )
+            return {
+                "description": "Audit connected Genesis MCP servers sharing the Blackbox WAL",
+                "messages": [{"role": "user", "content": {"type": "text", "text": text}}],
+            }
+        return None
+
     def handle_request(self, req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not isinstance(req, dict):
             return {
@@ -669,7 +785,7 @@ class BlackboxMCPServer:
                 "id": req_id,
                 "result": {
                     "protocolVersion": "2024-11-05",
-                    "capabilities": {"tools": {}},
+                    "capabilities": {"tools": {}, "resources": {}, "prompts": {}},
                     "serverInfo": {"name": self.name, "version": self.version}
                 }
             }
@@ -729,6 +845,33 @@ class BlackboxMCPServer:
                 "id": req_id,
                 "error": {"code": -32601, "message": f"Tool '{name}' not found."}
             }
+        elif method == "resources/list":
+            return {"jsonrpc": "2.0", "id": req_id, "result": {"resources": self.list_resources()}}
+        elif method == "resources/read":
+            params = req.get("params") or {}
+            uri = str(params.get("uri") or "")
+            item = self.read_resource(uri)
+            if item is None:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {"code": -32602, "message": f"Resource URI not found: {uri}"}
+                }
+            return {"jsonrpc": "2.0", "id": req_id, "result": {"contents": [item]}}
+        elif method == "prompts/list":
+            return {"jsonrpc": "2.0", "id": req_id, "result": {"prompts": self.list_prompts()}}
+        elif method == "prompts/get":
+            params = req.get("params") or {}
+            name = str(params.get("name") or "")
+            prompt_args = params.get("arguments") or {}
+            rendered = self.get_prompt(name, prompt_args)
+            if rendered is None:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {"code": -32602, "message": f"Prompt not found: {name}"}
+                }
+            return {"jsonrpc": "2.0", "id": req_id, "result": rendered}
 
         return {
             "jsonrpc": "2.0",

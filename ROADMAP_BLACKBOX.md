@@ -121,6 +121,30 @@ When an autonomous agent attempts to fix a production failure:
 - **Live SSE Streaming (`ui/server.py`)**:
   - High-performance `GET /api/live` Server-Sent Events endpoint streaming real-time WAL events to the embedded visualizer.
 
+### Phase 6: v0.3.0 – v0.5.0 Continuous Recording, Auto-Baseline & Async Perf (Completed)
+- **Native Pytest Plugin & Auto-Baseline Rotation (`integrations/pytest_plugin.py`, `recorder/baseline.py`)**:
+  - `pytest --blackbox` atomically promotes passing sessions to `.blackbox/wal.baseline.sqlite` and generates `.blackbox-diff.md` on failure.
+- **Surgical Watch Mode (`recorder/watcher.py`)**:
+  - Zero-dependency `os.stat` source watcher (`blackbox watch`) running only AST-impacted tests on source changes.
+- **Async `TraceContext`, N+1 SQL & Flake Analyzer (`recorder/context.py`, `compiler/perf_detector.py`, `compiler/flake_analyzer.py`)**:
+  - `contextvars` async span isolation, SQL fingerprint N+1 clustering, baseline latency regression checks, and flakiness classification (`blackbox diagnose-perf`).
+
+### Phase 7: v0.6.0 – v0.7.0 Offline Egress, Resource Profiling & Unified Genesis MCP Stack (Completed)
+- **Offline `EgressMocker` & `ResourceProfiler` (`recorder/egress_mocker.py`, `recorder/resource_profiler.py`)**:
+  - Outbound HTTP capture with secret redaction and standalone `unittest.mock` stub synthesis alongside stdlib `tracemalloc` + `/proc/self/fd` profiling.
+- **4-Step `AutonomousHealPlanner` (`compiler/heal_planner.py`)**:
+  - Deterministic repair plan unifying root cause, offline egress stubs, N+1/memory alerts, baseline divergence, and impacted regression tests (`blackbox heal-plan`).
+- **Unified MCP Stack Provisioner & Operational Incident Compiler (`stack.py`, `compiler/autopsy.py`)**:
+  - `blackbox init-stack` connecting `blackbox-mcp` + 6 Genesis MCP servers (`pgsafe-mcp`, `sysflow-mcp`, `crawlengine-mcp`, `browserbridge-mcp`, `omnibridge-mcp`, `fastmcp-forge`) to a shared `BLACKBOX_DB_PATH` WAL, cross-server diagnostics (`diagnose_mcp_ecosystem`), and `# ⚠️ BLACKBOX OPERATIONAL INCIDENT CAPSULE`.
+
+### Phase 8: v1.0.0 Production Consolidation & Ecosystem Parity (Completed)
+- **Auto-Wired Runtime Capture & Extended Interceptors**:
+  - `EgressMocker` extended to `urllib` + optional `requests` and `httpx`, plus `SqlInterceptor.install_sqlite3_global()` with re-entrancy guard; wired into `run_target()`, `auto_instrument()`, and `pytest --blackbox`.
+- **Full CLI, MCP Protocol & Web UI Parity**:
+  - Added `blackbox ecosystem` and `blackbox doctor` CLI subcommands, expanded `init-stack` to 6 clients (`cursor`, `claude`, `claude-code`, `windsurf`, `vscode`, `antigravity`), added MCP `resources/*` and `prompts/*`, and upgraded the localhost Web UI with timeline filters, `.zip` bundle download, and tabbed Ecosystem / Performance / Heal Plan diagnostics.
+- **True Zero-Dependency Runtime & Container Packaging**:
+  - Moved `pytest` to optional dependencies (`dependencies = []`), added `Dockerfile`, `glama.json`, `smithery.yaml`, root `docker-compose.genesis-stack.yml`, and interactive Examples 04 and 05.
+
 ---
 
 ## 4. Architectural Guarantees & Constraints

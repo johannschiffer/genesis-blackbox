@@ -1,0 +1,14 @@
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      dbPath:
+        type: string
+        description: Path to shared SQLite WAL flight recorder database
+        default: .blackbox/wal.sqlite
+  commandFunction: |-
+    (config) => ({
+      command: 'uvx',
+      args: ['--from', 'genesis-blackbox', 'blackbox-mcp', '--db', config.dbPath || '.blackbox/wal.sqlite']
+    })

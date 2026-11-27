@@ -1,9 +1,11 @@
-# Genesis Blackbox v0.7.0 Protocol for Claude
+# Genesis Blackbox v1.0.0 Protocol for Claude
 
-When diagnosing runtime errors, investigating regressions, or repairing crashes in this project, follow the mandatory Genesis Blackbox v0.7.0 autonomous repair loop using native MCP tools or CLI commands:
+When diagnosing runtime errors, investigating regressions, or repairing crashes in this project, follow the mandatory Genesis Blackbox v1.0.0 autonomous repair loop using native MCP tools, resources, prompts, or CLI commands:
 
-## Available MCP Tools
+## Available MCP Tools, Resources & Prompts
 
+- **MCP Resources:** `blackbox://autopsy/latest`, `blackbox://heal-plan/latest`, `blackbox://ecosystem/health`, `blackbox://timeline/recent`
+- **MCP Prompts:** `repair-latest-crash`, `audit-mcp-stack`
 - `get_full_incident_context`: 1-call unified payload returning `autopsy_markdown`, `baseline_diff` (from `.blackbox/wal.baseline.sqlite`), `reproduction_test`, AST `impacted_tests`, `performance_and_flakiness`, `egress_stubs`, `resource_profile`, and `mcp_ecosystem`.
 - `diagnose_mcp_ecosystem`: Aggregates per-server invocation counts, latency, security guard blocks, and operational errors across all connected Genesis MCP servers (`pgsafe-mcp`, `sysflow-mcp`, `crawlengine-mcp`, `browserbridge-mcp`, `omnibridge-mcp`, `fastmcp-forge`).
 - `get_autonomous_heal_plan`: Returns a deterministic 4-phase autonomous remediation plan (`blackbox heal-plan`) combining root cause, offline `EgressMocker` HTTP stubs, memory/perf alerts, baseline diff, and impacted tests.
@@ -22,9 +24,10 @@ When diagnosing runtime errors, investigating regressions, or repairing crashes 
 
 ## Continuous Recording & Auto-Baseline Rotation
 
-- Run `pytest --blackbox` to capture test failures and automatically promote clean sessions (`exitstatus == 0`) to `.blackbox/wal.baseline.sqlite` (disable with `--no-auto-baseline`). Subsequent failures automatically write `.blackbox-diff.md` and append `## Automatic Baseline Divergence` to `.blackbox.md`.
+- Run `pytest --blackbox [--blackbox-profile]` to capture test failures, egress calls, memory/FD profiles, and automatically promote clean sessions (`exitstatus == 0`) to `.blackbox/wal.baseline.sqlite` (disable with `--no-auto-baseline`). Subsequent failures automatically write `.blackbox-diff.md` and append `## Automatic Baseline Divergence` to `.blackbox.md`.
 - Run `blackbox watch [--root .] [--interval 1.0] [--once]` to monitor source edits and surgically run only AST-impacted tests.
-- Run `blackbox init-stack [--client cursor|claude|windsurf]` to wire `blackbox-mcp` and the 6 Genesis MCP servers to the same `BLACKBOX_DB_PATH`.
+- Run `blackbox init-stack [--client cursor|claude|claude-code|windsurf|vscode|antigravity]` to wire `blackbox-mcp` and the 6 Genesis MCP servers to the same `BLACKBOX_DB_PATH`.
+- Run `blackbox doctor` and `blackbox ecosystem` to verify runtime/WAL readiness and inspect cross-server telemetry from the CLI.
 
 ## Mandatory Autonomous Loop
 
